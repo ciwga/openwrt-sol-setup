@@ -1,0 +1,28 @@
+# Üretilen kurulum betikleri — PPPoE şifresi, Tailscale key içerir
+kurulum_dosyalari/
+kaldirma_dosyalari/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Geliştirme ortamı
+.env
+.venv
+venv/
+*.egg-info/
+dist/
+build/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -12,7 +12,7 @@ from typing import Final
 
 TAILSCALE_SETUP_TEMPLATE: Final[str] = r"""#!/bin/sh
 
-set -u # ==============================================================================
+# ==============================================================================
 # setup_tailscale.sh - Tailscale VPN Kurulumu
 # Subnet router + Exit node + WoL
 # ==============================================================================
@@ -39,7 +39,9 @@ echo "[1/5] Paketler... ($PKG_MANAGER)"
 
 pkg_update >/dev/null 2>&1 || true
 
-for pkg in tailscale iptables-nft etherwake; do
+# ÖNEMLİ DÜZELTME: nftables altyapısı kullanan güncel OpenWrt sürümlerinde 
+# tailscaled servisinin çökmesini önlemek için 'ip6tables-nft' paketi listeye eklendi.
+for pkg in tailscale iptables-nft ip6tables-nft etherwake; do
     if pkg_is_installed "$pkg"; then
         echo "    $pkg OK"
     else
@@ -58,7 +60,7 @@ echo "[2/5] Tailscale servisi..."
 /etc/init.d/tailscale start 2>/dev/null || true
 sleep 3
 
-# tailscaled çalıştığını doğrula
+# tailscaled servisinin arka planda çalışıp çalışmadığını doğrula
 if ! pidof tailscaled >/dev/null 2>&1; then
     echo "    HATA: tailscaled başlatılamadı!"
     /etc/init.d/tailscale start
@@ -70,7 +72,8 @@ echo "    tailscaled çalışıyor"
 # --- 3. TAILSCALE GİRİŞ ---
 echo "[3/5] Tailscale giriş..."
 
-# Auth key ile otomatik login
+# Auth key ile otomatik login işlemleri
+# Güvenlik notu: TS_AUTHKEY çevresel değişkeni (environment variable) kullanıldıktan hemen sonra temizlenmelidir.
 export TS_AUTHKEY="$TAILSCALE_AUTH_KEY"
 TS_ARGS="--auth-key=$TS_AUTHKEY"
 TS_ARGS="$TS_ARGS --advertise-routes=$LAN_SUBNET"
@@ -102,7 +105,10 @@ fi
 
 tailscale up $TS_ARGS 2>&1
 TS_UP_EXIT=$?
+
+# Hassas veriyi (Auth Key) bellekten ve çevresel değişkenlerden derhal temizle
 unset TS_AUTHKEY
+
 if [ $TS_UP_EXIT -ne 0 ]; then
     echo "    HATA: Tailscale login basarisiz!"
     echo "    Auth key gecerli mi? https://login.tailscale.com/admin/settings/keys"
@@ -134,7 +140,11 @@ echo "[4/5] Firewall ayarları..."
 uci -q delete firewall.tailscale_zone 2>/dev/null || true
 uci set firewall.tailscale_zone=zone
 uci set firewall.tailscale_zone.name='tailscale'
-uci set firewall.tailscale_zone.input='DROP'
+
+# ÖNEMLİ DÜZELTME: Tailscale ağındaki cihazların (örn. telefonunuz) 
+# OpenWrt üzerindeki DNS sunucusuna (AdGuard) erişebilmesi için input 'ACCEPT' olarak değiştirildi.
+uci set firewall.tailscale_zone.input='ACCEPT'
+
 uci set firewall.tailscale_zone.output='ACCEPT'
 uci set firewall.tailscale_zone.forward='REJECT'
 # forward=REJECT — izinler explicit forwarding kurallarıyla verilir (ts_to_lan, ts_to_wan)
@@ -162,7 +172,7 @@ if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
     uci set firewall.ts_to_wan.dest='wan'
 fi
 
-# IP yönlendirme (forwarding)
+# IP yönlendirme (forwarding) - Çekirdek (Kernel) seviyesi yapılandırma
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-tailscale.conf
 echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-tailscale.conf
 sysctl -p /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true
@@ -230,10 +240,12 @@ echo "================================================================"
 
 TAILSCALE_UNINSTALL_TEMPLATE: Final[str] = r"""#!/bin/sh
 
-set -e
-set -u # ==============================================================================
+# ==============================================================================
 # uninstall_tailscale.sh - Tailscale Komple Kaldırma
 # ==============================================================================
+
+set -e
+set -u 
 
 <<PKG_MANAGER_BLOCK>>
 
@@ -283,7 +295,7 @@ for domain in tailscale.com ts.net tailscaled.net; do
 done
 uci commit dhcp 2>/dev/null || true
 
-# Dosya temizliği
+# Dosya temizliği (Artık verilerin güvenli imhası)
 rm -rf /var/lib/tailscale 2>/dev/null || true
 rm -rf /etc/tailscale 2>/dev/null || true
 rm -f /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true

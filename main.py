@@ -15,7 +15,7 @@ import os
 import sys
 from typing import Dict, List, Tuple, Callable, Optional
 from manager import Manager
-from utils import write_safe_file, print_ssh_usage, detect_platform
+from utils import write_safe_file, print_ssh_usage, detect_platform, FABRIC_AVAILABLE, deploy_and_run_via_fabric
 
 BANNER: str = """
 ============================================================
@@ -395,14 +395,10 @@ def generate_and_save(mgr: Manager, config: Dict[str, str], mode: str) -> None:
 # ---- CLI Ana Metodu ----
 
 def run_cli() -> None:
-    """
-    Uygulamanın ana komut satırı arayüzünü (CLI) başlatır.
-    """
     print(BANNER)
-
     plat = detect_platform()
     if plat == "openwrt":
-        print("  UYARI: Bu araç bilgisayarınızda çalıştırılmalıdır!\n")
+        print("  UYARI: Bu araç bilgisayarınızda (yerel makinede) çalıştırılmalıdır!\n")
 
     mgr = Manager()
 
@@ -428,73 +424,66 @@ def run_cli() -> None:
     choice = ask_choice("Seçiminiz (1-9): ", [str(i) for i in range(1, 10)])
     config: Dict[str, str] = {}
 
-    # Seçime göre ilgili menülerin başlatılması
-    if choice in ("1", "6"):
-        config.update(collect_wan_config(mgr))
-    if choice in ("2", "6"):
-        config.update(collect_tvplus_config(mgr))
-    if choice in ("3", "6"):
-        config.update(collect_dns_config(mgr))
-    if choice in ("4", "6"):
-        config.update(collect_zapret_config(mgr))
-    if choice in ("5", "6"):
-        config.update(collect_tailscale_config(mgr))
+    if choice in ("1", "6"): config.update(collect_wan_config(mgr))
+    if choice in ("2", "6"): config.update(collect_tvplus_config(mgr))
+    if choice in ("3", "6"): config.update(collect_dns_config(mgr))
+    if choice in ("4", "6"): config.update(collect_zapret_config(mgr))
+    if choice in ("5", "6"): config.update(collect_tailscale_config(mgr))
 
-    # Kullanıcının belirtmediği değerleri varsayılanlar ile doldur
     for key, val in mgr.defaults.items():
         if key not in config:
             config[key] = str(val)
 
-    # Yapılandırmada çelişen/hatalı kurallar var mı kontrol et
     try:
         mgr.check_conflicts(config)
     except ValueError as e:
         print(f"\n  YAPILANDIRMA HATASI: {e}")
         sys.exit(1)
 
-    mode_map = {
-        "1": "wan", "2": "tvplus", "3": "dns", "4": "zapret",
-        "5": "tailscale", "6": "all", "7": "disk", "8": "fan", "9": "ipv6",
-    }
+    mode_map = {"1": "wan", "2": "tvplus", "3": "dns", "4": "zapret", "5": "tailscale", "6": "all", "7": "disk", "8": "fan", "9": "ipv6"}
+    mode = mode_map[choice]
     
     print("\n" + "=" * 50)
-    generate_and_save(mgr, config, mode_map[choice])
+    generate_and_save(mgr, config, mode)
     print("=" * 50)
 
     rip = config.get("lan_ip", "192.168.1.1")
-    print(f"\n  Dosyalar oluşturuldu:")
+    print(f"\n  Dosyalar yerel diske oluşturuldu:")
     print(f"    📁 {KURULUM_DIR}/   → Kurulum betikleri")
     print(f"    📁 {KALDIRMA_DIR}/  → Kaldırma betikleri")
 
-    mode = mode_map[choice]
-
-    if mode == "all":
-        print("\n  Komple kurulum — sırasıyla çalıştırın:")
-        print_ssh_usage(f"{KURULUM_DIR}/setup_all.sh", rip)
+    # Hedef betik adını belirle
+    target_script = None
+    if mode == "all": target_script = "setup_all.sh"
+    elif mode == "disk": target_script = "expand_disk.sh"
+    elif mode == "fan": target_script = "setup_argon_fan.sh"
     elif mode == "ipv6":
-        print("\n  IPv6 KAPATMAK için:")
-        print_ssh_usage(f"{KURULUM_DIR}/disable_ipv6.sh", rip)
-        print("  IPv6 AÇMAK için:")
-        print_ssh_usage(f"{KURULUM_DIR}/enable_ipv6.sh", rip)
-    elif mode == "disk":
-        print("\n  ⚠️  Disk genişletme 2 kez yeniden başlatma gerektirir.")
-        print_ssh_usage(f"{KURULUM_DIR}/setup_disk_expand.sh", rip)
-    elif mode == "fan":
-        print("\n  ℹ️  Sadece Argon ONE V3 kasası olan RPi5 için geçerlidir.")
-        print_ssh_usage(f"{KURULUM_DIR}/setup_argon_fan.sh", rip)
+        ans = ask_choice("\nHangisi işlemi yapmak istiyorsunuz? (1: Aç, 2: Kapat, 3: İptal): ", ["1", "2", "3"])
+        if ans == "1": target_script = "enable_ipv6.sh"
+        elif ans == "2": target_script = "disable_ipv6.sh"
     else:
-        # Tek modül — birincil setup betiğini göster
-        setup_files = {
-            "wan":      "setup_wan.sh",
-            "tvplus":   "setup_tvplus.sh",
-            "dns":      "setup_dns_chain.sh",
-            "zapret":   "setup_zapret.sh",
-            "tailscale":"setup_tailscale.sh",
-        }
-        fname = setup_files.get(mode)
-        if fname:
-            print_ssh_usage(f"{KURULUM_DIR}/{fname}", rip)
-    print("")
+        fname_map = {"wan": "setup_wan.sh", "tvplus": "setup_tvplus.sh", "dns": "setup_dns_chain.sh", "zapret": "setup_zapret.sh", "tailscale": "setup_tailscale.sh"}
+        target_script = fname_map.get(mode)
+
+    # Otomasyon akışı
+    if target_script:
+        local_script_path = os.path.join(KURULUM_DIR, target_script)
+        
+        if FABRIC_AVAILABLE:
+            auto_ans = ask_choice(f"\n  🤖 [SSH Otomasyon] '{target_script}' router'a ({rip}) gönderilip hemen ÇALIŞTIRILSIN MI? (E/h): ", ["E", "e", "H", "h", ""])
+            if auto_ans.lower() in ('e', ''):
+                deploy_and_run_via_fabric(rip, local_script_path)
+            else:
+                print("\n  [Manuel Kurulum] Terminalden çalıştırmak için kopyalayın:")
+                print_ssh_usage(local_script_path, rip)
+        else:
+            print("\n  [Bilgi] 'fabric' modülü yüklü olmadığı için otomatik gönderim devre dışı.")
+            print("          (Yüklemek için terminalde: pip install fabric)")
+            print("\n  [Manuel Kurulum] Terminalden çalıştırmak için kopyalayın:")
+            print_ssh_usage(local_script_path, rip)
+            
+    if mode == "disk":
+        print("\n  ⚠️ NOT: Disk genişletme router üzerinde 2 kez yeniden başlatma (reboot) gerektirir.")
 
 
 if __name__ == "__main__":

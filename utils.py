@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Dosya işlemleri, SSH bilgi toplama ve yardımcı fonksiyonlar."""
+"""Dosya işlemleri, SSH bilgi toplama ve Fabric tabanlı otomasyon fonksiyonları."""
 
 import os
 import stat
 import subprocess
 import platform
 import shutil
+import getpass
 from pathlib import Path
 from typing import Optional, Dict
+
+try:
+    from fabric import Connection
+    from invoke.exceptions import UnexpectedExit
+    FABRIC_AVAILABLE = True
+except ImportError:
+    FABRIC_AVAILABLE = False
 
 
 def write_safe_file(filename: str, content: str) -> None:
@@ -25,7 +33,6 @@ def write_safe_file(filename: str, content: str) -> None:
 
         is_safe_path = False
         try:
-            # Sadece geçerli dizin veya altındaki dosyalara izin ver
             if hasattr(target_path, 'is_relative_to'):
                 is_safe_path = target_path.is_relative_to(current_working_dir)
             else:
@@ -37,7 +44,6 @@ def write_safe_file(filename: str, content: str) -> None:
             print(f"  GÜVENLİK HATASI: Hedef yol çalışma dizini dışında: '{target_path}'")
             return
 
-        # Üst klasör yoksa oluştur
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         with target_path.open("w", encoding="utf-8", newline='\n') as f:
@@ -51,8 +57,6 @@ def write_safe_file(filename: str, content: str) -> None:
             except OSError:
                 pass
 
-        print(f"  [+] {target_path}")
-
     except PermissionError:
         print(f"  HATA: '{filename}' dosyasına yazma izniniz yok.")
     except IOError as e:
@@ -61,8 +65,8 @@ def write_safe_file(filename: str, content: str) -> None:
 
 def print_ssh_usage(filename: str, router_ip: str = "192.168.1.1") -> None:
     """
-    Oluşturulan betiği SSH üzerinden çalıştırmak için kullanım ipuçlarını terminale basar.
-
+    Oluşturulan betiği manuel olarak SSH üzerinden çalıştırmak için kullanım ipuçlarını basar.
+    
     Args:
         filename (str): SSH komutuyla gönderilecek dosyanın yolu.
         router_ip (str, optional): Hedef cihazın IP adresi. Defaults to "192.168.1.1".
@@ -77,24 +81,66 @@ def print_ssh_usage(filename: str, router_ip: str = "192.168.1.1") -> None:
         pass
 
 
-def ssh_cmd(host: str, cmd: str, user: str = "root", timeout: int = 10) -> str:
+def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = "/tmp") -> bool:
     """
-    Hedef yönlendirici üzerinde SSH komutu çalıştırır ve çıktısını döndürür.
-
+    Fabric kullanarak yerel shell betiğini OpenWrt cihazına aktarır, çalıştırır ve temizler.
+    
     Args:
         host (str): Hedef IP adresi.
-        cmd (str): Çalıştırılacak shell komutu.
-        user (str, optional): SSH kullanıcı adı. Defaults to "root".
-        timeout (int, optional): Zaman aşımı süresi (saniye). Defaults to 10.
-
+        local_filepath (str): Gönderilecek yerel dosyanın yolu.
+        remote_dir (str): Dosyanın atılacağı uzak sunucu dizini.
+        
     Returns:
-        str: Çalıştırılan komutun standart çıktısı (stdout).
+        bool: İşlem başarılıysa True, aksi halde False.
     """
+    if not FABRIC_AVAILABLE:
+        print("  [Hata] Fabric kütüphanesi yüklü değil. Kurmak için: pip install fabric")
+        return False
+
+    print(f"\n  [SSH Otomasyonu] {host} adresine bağlanılıyor...")
+    password = getpass.getpass(f"  root@{host} parolası (şifre yoksa boş bırakıp Enter'a basın): ")
+    
+    connect_kwargs = {}
+    if password:
+        connect_kwargs["password"] = password
+        
+    filename = os.path.basename(local_filepath)
+    remote_path = f"{remote_dir}/{filename}"
+
+    try:
+        # Yönlendiriciye bağlantı kur
+        with Connection(host=host, user="root", connect_kwargs=connect_kwargs) as conn:
+            print(f"  [+] Bağlantı başarılı! Dosya aktarılıyor: {filename}")
+            conn.put(local_filepath, remote_path)
+            
+            print("  [+] Çalıştırılabilir (executable) yetkisi veriliyor...")
+            conn.run(f"chmod +x {remote_path}", hide=True)
+            
+            print(f"\n{'='*60}\n  BETİK ÇIKTISI BAŞLANGICI\n{'='*60}")
+            # pty=True terminalin renk ve formatlamasını korur, gerçek zamanlı çıktı verir
+            conn.run(remote_path, pty=True)
+            print(f"{'='*60}\n  BETİK ÇIKTISI SONU\n{'='*60}")
+            
+            print("  [+] Temizlik yapılıyor (Geçici dosya siliniyor)...")
+            conn.run(f"rm -f {remote_path}", hide=True)
+            
+        print("  [✅] Otomatik kurulum işlemi başarıyla tamamlandı!")
+        return True
+        
+    except UnexpectedExit as e:
+        print(f"\n  [HATA] Betik çalıştırılırken sunucuda bir hata oluştu. Çıkış Kodu: {e.result.exited}")
+        return False
+    except Exception as e:
+        print(f"\n  [BAĞLANTI HATASI] Router ile iletişim kurulamadı:\n  {e}")
+        return False
+
+
+def ssh_cmd(host: str, cmd: str, user: str = "root", timeout: int = 10) -> str:
+    """Eski alt seviye (subprocess) SSH komut çalıştırıcısı (Geriye uyumluluk için)."""
     ssh_binary = shutil.which("ssh")
     if not ssh_binary:
         return ""
     try:
-        # Etkileşimsiz mod (BatchMode=yes) ile güvenli bir şekilde komutu çalıştır
         full_cmd = [
             ssh_binary, "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=no",
@@ -108,15 +154,7 @@ def ssh_cmd(host: str, cmd: str, user: str = "root", timeout: int = 10) -> str:
 
 
 def gather_router_info(host: str) -> Optional[Dict[str, str]]:
-    """
-    SSH ile yönlendiriciye (router) bağlanır ve donanım/yapılandırma bilgilerini toplar.
-
-    Args:
-        host (str): Router IP adresi.
-
-    Returns:
-        Optional[Dict[str, str]]: Toplanan bilgilerin bulunduğu sözlük. Bağlantı kurulamazsa None döner.
-    """
+    """SSH ile router donanım bilgilerini toplar."""
     print(f"\n  {host} adresine SSH ile bağlanılıyor...")
     test = ssh_cmd(host, "echo ok")
     if test != "ok":
@@ -145,12 +183,7 @@ def gather_router_info(host: str) -> Optional[Dict[str, str]]:
 
 
 def detect_platform() -> str:
-    """
-    Betiklerin çalıştığı mevcut platformu (İşletim Sistemini) tespit eder.
-
-    Returns:
-        str: İşletim sistemi tanımı ("openwrt", "linux", "macos", "windows" veya "unknown").
-    """
+    """Mevcut işletim sistemini tespit eder."""
     system = platform.system().lower()
     if system == "linux":
         if os.path.exists("/etc/openwrt_release"):

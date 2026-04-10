@@ -8,7 +8,7 @@ import platform
 import shutil
 import getpass
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 
 try:
     from fabric import Connection
@@ -88,7 +88,7 @@ def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = 
     Args:
         host (str): Hedef IP adresi.
         local_filepath (str): Gönderilecek yerel dosyanın yolu.
-        remote_dir (str): Dosyanın atılacağı uzak sunucu dizini.
+        remote_dir (str): Dosyanın atılacağı uzak sunucu dizini. Varsayılan olarak "/tmp".
         
     Returns:
         bool: İşlem başarılıysa True, aksi halde False.
@@ -100,7 +100,12 @@ def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = 
     print(f"\n  [SSH Otomasyonu] {host} adresine bağlanılıyor...")
     password = getpass.getpass(f"  root@{host} parolası (şifre yoksa boş bırakıp Enter'a basın): ")
     
-    connect_kwargs = {}
+    # Paramiko bağlantı ayarları
+    connect_kwargs: Dict[str, Any] = {
+        "look_for_keys": True,
+        "allow_agent": True,
+    }
+    
     if password:
         connect_kwargs["password"] = password
         
@@ -111,13 +116,14 @@ def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = 
         # Yönlendiriciye bağlantı kur
         with Connection(host=host, user="root", connect_kwargs=connect_kwargs) as conn:
             print(f"  [+] Bağlantı başarılı! Dosya aktarılıyor: {filename}")
-            conn.put(local_filepath, remote_path)
+            
+            with open(local_filepath, "r", encoding="utf-8") as f:
+                conn.run(f"cat > {remote_path}", in_stream=f, hide=True)
             
             print("  [+] Çalıştırılabilir (executable) yetkisi veriliyor...")
             conn.run(f"chmod +x {remote_path}", hide=True)
             
             print(f"\n{'='*60}\n  BETİK ÇIKTISI BAŞLANGICI\n{'='*60}")
-            # pty=True terminalin renk ve formatlamasını korur, gerçek zamanlı çıktı verir
             conn.run(remote_path, pty=True)
             print(f"{'='*60}\n  BETİK ÇIKTISI SONU\n{'='*60}")
             
@@ -131,12 +137,36 @@ def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = 
         print(f"\n  [HATA] Betik çalıştırılırken sunucuda bir hata oluştu. Çıkış Kodu: {e.result.exited}")
         return False
     except Exception as e:
-        print(f"\n  [BAĞLANTI HATASI] Router ile iletişim kurulamadı:\n  {e}")
+        error_str = str(e)
+        print(f"\n  [BAĞLANTI HATASI] Router ile iletişim kurulamadı:")
+        print(f"  Ayrıntı: {error_str}")
+        
+        if "Authentication" in error_str or "authentication methods" in error_str.lower() or "Bad authentication type" in error_str:
+            print("\n  💡 ÇÖZÜM İPUCU:")
+            print("  1. BOŞ ŞİFRE KISITLAMASI: OpenWrt terminalden (CMD) boş şifre ile erişime izin verse de,")
+            print("     kullandığımız Python SSH kütüphanesi (Paramiko) yerel güvenlik politikaları gereği")
+            print("     bazı durumlarda şifresiz (none auth) bağlantıları reddedebilir.")
+            print("     Çözüm: LuCI (Web) arayüzünden cihaza gecici bir 'root' şifresi belirleyip tekrar deneyin.")
+            print("  2. ŞİFRE YANLIŞLIĞI: Eğer zaten şifreniz varsa, klavye düzenine dikkat ederek doğru girdiğinizden emin olun.")
+            print("  3. MANUEL KURULUM: SSH kütüphanesi ile uğraşmak istemiyorsanız, betiği iptal edip")
+            print("     ekranda verilen komutu kopyalayarak kendi terminalinizden yapıştırabilirsiniz.")
+            
         return False
 
 
 def ssh_cmd(host: str, cmd: str, user: str = "root", timeout: int = 10) -> str:
-    """Eski alt seviye (subprocess) SSH komut çalıştırıcısı (Geriye uyumluluk için)."""
+    """
+    Eski alt seviye (subprocess) SSH komut çalıştırıcısı (Geriye uyumluluk için).
+    
+    Args:
+        host (str): Hedef cihazın IP adresi.
+        cmd (str): Çalıştırılacak olan komut.
+        user (str, optional): Bağlanılacak kullanıcı. Varsayılan 'root'.
+        timeout (int, optional): Zaman aşımı süresi (saniye). Varsayılan 10.
+        
+    Returns:
+        str: Komutun stdout çıktısı. Başarısızlıkta boş string döner.
+    """
     ssh_binary = shutil.which("ssh")
     if not ssh_binary:
         return ""
@@ -154,7 +184,15 @@ def ssh_cmd(host: str, cmd: str, user: str = "root", timeout: int = 10) -> str:
 
 
 def gather_router_info(host: str) -> Optional[Dict[str, str]]:
-    """SSH ile router donanım bilgilerini toplar."""
+    """
+    SSH ile yönlendirici (router) üzerinden cihaz ve donanım bilgilerini toplar.
+    
+    Args:
+        host (str): Hedef cihazın IP adresi.
+        
+    Returns:
+        Optional[Dict[str, str]]: Başarılı olursa toplanan bilgilerin sözlüğü, başarısızlıkta None.
+    """
     print(f"\n  {host} adresine SSH ile bağlanılıyor...")
     test = ssh_cmd(host, "echo ok")
     if test != "ok":
@@ -183,7 +221,12 @@ def gather_router_info(host: str) -> Optional[Dict[str, str]]:
 
 
 def detect_platform() -> str:
-    """Mevcut işletim sistemini tespit eder."""
+    """
+    Betiklerin çalıştırıldığı mevcut yerel işletim sistemini (OS) tespit eder.
+    
+    Returns:
+        str: İşletim sistemi tanımı ('openwrt', 'linux', 'macos', 'windows' veya 'unknown').
+    """
     system = platform.system().lower()
     if system == "linux":
         if os.path.exists("/etc/openwrt_release"):

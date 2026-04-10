@@ -4,7 +4,6 @@
 OpenWrt Ağ Yöneticisi - CLI
 
 Raspberry Pi 5 üzerinde OpenWrt için yapılandırma betikleri üretir.
-USB-Ethernet (r8152/RTL8156B) adaptör desteği dahildir.
 
 Çıktı klasör yapısı:
   kurulum_dosyalari/   → Kurulum betikleri
@@ -452,36 +451,84 @@ def run_cli() -> None:
     print(f"    📁 {KURULUM_DIR}/   → Kurulum betikleri")
     print(f"    📁 {KALDIRMA_DIR}/  → Kaldırma betikleri")
 
-    # Hedef betik adını belirle
-    target_script = None
-    if mode == "all": target_script = "setup_all.sh"
-    elif mode == "disk": target_script = "expand_disk.sh"
-    elif mode == "fan": target_script = "setup_argon_fan.sh"
-    elif mode == "ipv6":
-        ans = ask_choice("\nHangisi işlemi yapmak istiyorsunuz? (1: Aç, 2: Kapat, 3: İptal): ", ["1", "2", "3"])
-        if ans == "1": target_script = "enable_ipv6.sh"
-        elif ans == "2": target_script = "disable_ipv6.sh"
-    else:
-        fname_map = {"wan": "setup_wan.sh", "tvplus": "setup_tvplus.sh", "dns": "setup_dns_chain.sh", "zapret": "setup_zapret.sh", "tailscale": "setup_tailscale.sh"}
-        target_script = fname_map.get(mode)
+    # Kullanıcıya seçenek sunmak için dinamik yapılandırma
+    available_scripts: List[Tuple[str, str, str]] = []
 
-    # Otomasyon akışı
-    if target_script:
-        local_script_path = os.path.join(KURULUM_DIR, target_script)
-        
-        if FABRIC_AVAILABLE:
-            auto_ans = ask_choice(f"\n  🤖 [SSH Otomasyon] '{target_script}' router'a ({rip}) gönderilip hemen ÇALIŞTIRILSIN MI? (E/h): ", ["E", "e", "H", "h", ""])
-            if auto_ans.lower() in ('e', ''):
-                deploy_and_run_via_fabric(rip, local_script_path)
+    if mode == "wan":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_wan.sh"), "setup_wan.sh", "WAN Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_wan.sh"), "uninstall_wan.sh", "WAN Kaldırma Betiği")
+        ]
+    elif mode == "tvplus":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_tvplus.sh"), "setup_tvplus.sh", "TV+ Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_tvplus.sh"), "uninstall_tvplus.sh", "TV+ Kaldırma Betiği")
+        ]
+    elif mode == "dns":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_dns_chain.sh"), "setup_dns_chain.sh", "DNS Zinciri Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_dns_chain.sh"), "uninstall_dns_chain.sh", "DNS Zinciri Kaldırma Betiği")
+        ]
+    elif mode == "zapret":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_zapret.sh"), "setup_zapret.sh", "Zapret Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_zapret.sh"), "uninstall_zapret.sh", "Zapret Kaldırma Betiği")
+        ]
+    elif mode == "tailscale":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_tailscale.sh"), "setup_tailscale.sh", "Tailscale Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_tailscale.sh"), "uninstall_tailscale.sh", "Tailscale Kaldırma Betiği")
+        ]
+    elif mode == "all":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_all.sh"), "setup_all.sh", "Komple Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_all.sh"), "uninstall_all.sh", "Komple Kaldırma Betiği")
+        ]
+    elif mode == "ipv6":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "enable_ipv6.sh"), "enable_ipv6.sh", "IPv6 Açma Betiği"),
+            (os.path.join(KURULUM_DIR, "disable_ipv6.sh"), "disable_ipv6.sh", "IPv6 Kapatma Betiği")
+        ]
+    elif mode == "disk":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "expand_disk.sh"), "expand_disk.sh", "Disk Genişletme Betiği"),
+            (os.path.join(KURULUM_DIR, "disk_status.sh"), "disk_status.sh", "Disk Durumu Raporlama Betiği")
+        ]
+    elif mode == "fan":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_argon_fan.sh"), "setup_argon_fan.sh", "Argon Fan Kurulum Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_argon_fan.sh"), "uninstall_argon_fan.sh", "Argon Fan Kaldırma Betiği")
+        ]
+
+    # Otomasyon akışı ve betik seçimi
+    if available_scripts:
+        print("\n  🤖 [SSH Otomasyon] İşlem yapılacak betiği seçin:")
+        for idx, (path, name, desc) in enumerate(available_scripts, start=1):
+            print(f"    {idx}. {name} ({desc})")
+        print("    0. Hiçbiri (Manuel işlem yapacağım)")
+
+        valid_script_choices = [str(i) for i in range(len(available_scripts) + 1)]
+        script_ans = ask_choice("\n  Seçiminiz: ", valid_script_choices)
+
+        if script_ans != "0":
+            selected_idx = int(script_ans) - 1
+            selected_path, selected_name, selected_desc = available_scripts[selected_idx]
+
+            if FABRIC_AVAILABLE:
+                auto_ans = ask_choice(f"\n  🤖 [SSH Otomasyon] '{selected_name}' router'a ({rip}) gönderilip hemen ÇALIŞTIRILSIN MI? (E/h): ", ["E", "e", "H", "h", ""])
+                if auto_ans.lower() in ('e', ''):
+                    deploy_and_run_via_fabric(rip, selected_path)
+                else:
+                    print(f"\n  [Manuel İşlem] Terminalden çalıştırmak için kopyalayın:")
+                    print_ssh_usage(selected_path, rip)
             else:
-                print("\n  [Manuel Kurulum] Terminalden çalıştırmak için kopyalayın:")
-                print_ssh_usage(local_script_path, rip)
+                print("\n  [Bilgi] 'fabric' modülü yüklü olmadığı için otomatik gönderim devre dışı.")
+                print("          (Yüklemek için terminalde: pip install fabric)")
+                print(f"\n  [Manuel İşlem] Terminalden çalıştırmak için kopyalayın:")
+                print_ssh_usage(selected_path, rip)
         else:
-            print("\n  [Bilgi] 'fabric' modülü yüklü olmadığı için otomatik gönderim devre dışı.")
-            print("          (Yüklemek için terminalde: pip install fabric)")
-            print("\n  [Manuel Kurulum] Terminalden çalıştırmak için kopyalayın:")
-            print_ssh_usage(local_script_path, rip)
-            
+            print("\n  [Bilgi] Otomatik gönderim iptal edildi. Oluşturulan betikleri manuel kullanabilirsiniz.")
+
     if mode == "disk":
         print("\n  ⚠️ NOT: Disk genişletme router üzerinde 2 kez yeniden başlatma (reboot) gerektirir.")
 

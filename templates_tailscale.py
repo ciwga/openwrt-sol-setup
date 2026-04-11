@@ -84,20 +84,21 @@ uci set firewall.tailscale_zone.output='ACCEPT'
 # REJECT olan forward ayarı ACCEPT olarak değiştirildi.
 uci set firewall.tailscale_zone.forward='ACCEPT'
 uci set firewall.tailscale_zone.masq='1'
+# MTU/MSS Fix: VPN içerisindeki TCP tıkanıklıklarını/kopmaları engeller.
+# OpenWrt fw4 (nftables) mimarisinde bu ayar 'forwarding' değil 'zone' seviyesinde olmalıdır.
+uci set firewall.tailscale_zone.mtu_fix='1'
 
 # Tailscale -> LAN yönlendirme
 uci -q delete firewall.ts_to_lan 2>/dev/null || true
 uci set firewall.ts_to_lan=forwarding
 uci set firewall.ts_to_lan.src='tailscale'
 uci set firewall.ts_to_lan.dest='lan'
-uci set firewall.ts_to_lan.mtu_fix='1'
 
 # LAN -> Tailscale yönlendirme
 uci -q delete firewall.lan_to_ts 2>/dev/null || true
 uci set firewall.lan_to_ts=forwarding
 uci set firewall.lan_to_ts.src='lan'
 uci set firewall.lan_to_ts.dest='tailscale'
-uci set firewall.lan_to_ts.mtu_fix='1'
  
 # Tailscale -> WAN
 if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
@@ -105,7 +106,6 @@ if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
     uci set firewall.ts_to_wan=forwarding
     uci set firewall.ts_to_wan.src='tailscale'
     uci set firewall.ts_to_wan.dest='wan'
-    uci set firewall.ts_to_wan.mtu_fix='1'
 fi
 
 # 3.3 Firewall Trafik Kuralları (Traffic Rules)

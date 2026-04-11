@@ -145,6 +145,10 @@ ISP_DNS="<<ISP_DNS>>"
 ISP_DNS1=$(echo "$ISP_DNS" | cut -d',' -f1 | tr -d ' ')
 ISP_DNS2=$(echo "$ISP_DNS" | cut -d',' -f2 -s | tr -d ' ')
 
+# Kullanıcı girişi boş gelirse YAML bozulmasın diye güvenlik varsayılanı (Fail-safe)
+[ -z "$ISP_DNS1" ] && ISP_DNS1="213.74.0.1"
+[ -z "$ISP_DNS2" ] && ISP_DNS2="213.74.1.1"
+
 # YAML yapılandırma
 # AdGuard port 53'te DİNLİYOR -> istemciler doğrudan bağlanıyor -> per-client görünürlük
 # Split-DNS: [/superonline.net/] formatında ISP DNS'e yönlendirme
@@ -271,8 +275,9 @@ for idx in $(seq 20 -1 0); do
 done
 
 ISP_DNS_CLEAN=$(echo "$ISP_DNS" | tr -d ' ')
+[ -z "$ISP_DNS_CLEAN" ] && ISP_DNS_CLEAN="213.74.0.1"
 
-if [ -n "$TVPLUS_STB_MAC" ] && [ -n "$ISP_DNS" ]; then
+if [ -n "$TVPLUS_STB_MAC" ]; then
     uci set dhcp.tvplus_stb=host
     uci set dhcp.tvplus_stb.name='tvplus-stb'
     uci set dhcp.tvplus_stb.mac="$TVPLUS_STB_MAC"

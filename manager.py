@@ -8,7 +8,7 @@ import binascii
 from typing import Dict, Any, Final, List
 
 from compat import PKG_MANAGER_BLOCK, USB_FIX_SERVICE, OPENWRT_GUARD
-from templates_tvplus import TVPLUS_SETUP_TEMPLATE, TVPLUS_UNINSTALL_TEMPLATE
+from templates_tvplus import TVPLUS_SETUP_TEMPLATE, TVPLUS_L2_SETUP_TEMPLATE, TVPLUS_UNINSTALL_TEMPLATE
 from templates_dns import DNS_CHAIN_SETUP_TEMPLATE, DNS_CHAIN_UNINSTALL_TEMPLATE
 from templates_zapret import ZAPRET_SETUP_TEMPLATE, ZAPRET_UNINSTALL_TEMPLATE
 from templates_tailscale import TAILSCALE_SETUP_TEMPLATE, TAILSCALE_UNINSTALL_TEMPLATE
@@ -29,7 +29,9 @@ REGEX_PORT: Final[re.Pattern] = re.compile(r"^\d+$")
 DEFAULT_ZAPRET_DOMAINS: Final[List[str]] = [
     "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com",
     "ggpht.com", "gstatic.com", "googleapis.com",
-    "discord.com", "discord.gg", "discordapp.com",
+    "discord.com", "discord.gg", "discordapp.com", "xcancel.com",
+    "protonvpn.com", "pastebin.com", "4shared.com", "wikileaks.org",
+    "pages.dev", "cloudflare.com"
 ]
 
 # Boş bırakılabilir alanların listesi
@@ -37,7 +39,7 @@ OPTIONAL_FIELDS: Final[set] = {
     "mac_address", "client_id", "host_name", "zapret_domains", "tv_eth2_port", "iptv_mode", "wan_vlan_id", "tailnet_name", "wol_enabled",
     "tvplus_stb_mac", "tvplus_stb_ip", "isp_dns",
     "tailscale_auth_key", "lan_subnet",
-    "pppoe_user", "pppoe_pass", "custom_dns", "usb_eth",
+    "pppoe_user", "pppoe_pass", "custom_dns", "usb_eth", "wan_mac_address",
 }
 
 
@@ -63,9 +65,9 @@ class Manager:
             "host_name": "",
             "iptv_ipv6": "hayır",
             "mtu_value": "otomatik",
-            "auto_multicast": "evet",  # Dinamik altnet tespiti varsayılan ayarı
-            "iptv_mode": "proxy",           # tek mod
-            "tv_eth2_port": "",             # boş=TV br-lan'da | eth2=izole subnet
+            "auto_multicast": "evet",
+            "iptv_mode": "bridge",          # Default L2 Bridge, en stabil yöntem
+            "tv_eth2_port": "",             # Özel port varsa bridge aktifleşir
         }
         self.dns_defaults: Dict[str, Any] = {
             "lan_ip": "192.168.1.1",
@@ -74,7 +76,7 @@ class Manager:
             "hdnsp_port": "5053",
             "tvplus_stb_mac": "",
             "tvplus_stb_ip": "",
-            "isp_dns": "213.74.0.1,213.74.1.1",  # Superonline WAN DNS
+            "isp_dns": "213.74.0.1,213.74.1.1",
         }
         self.zapret_defaults: Dict[str, Any] = {
             "zapret_domains": " ".join(DEFAULT_ZAPRET_DOMAINS),
@@ -84,21 +86,22 @@ class Manager:
             "lan_subnet": "192.168.1.0/24",
             "advertise_exit_node": "evet",
             "accept_dns": "hayır",
-            "tailnet_name": "",  # örn: myname.ts.net — MagicDNS için
-            "wol_enabled": "hayır",  # Wake-on-LAN (etherwake) kurulsun mu?
+            "tailnet_name": "",
+            "wol_enabled": "hayır",
         }
         self.wan6_defaults: Dict[str, Any] = {
-            "ipv6_mode": "kapalı",  # otomatik / açık / kapalı
+            "ipv6_mode": "kapalı",
         }
         self.wan_defaults: Dict[str, Any] = {
             "pppoe_user": "",
             "pppoe_pass": "",
             "wan_phys": "eth1",
-            "wan_vlan_id": "",   # boş = VLAN yok (Superonline). Türk Telekom için "35"
+            "wan_vlan_id": "",
+            "wan_mac_address": "", # ISP'nin tanıdığı orijinal modem MAC klonlaması
             "custom_dns": "",
             "timezone": "Europe/Istanbul",
             "timezone_code": "TRT-3",
-            "usb_eth": "yok",  # r8152 / RTL8156B USB Fix arayüzü varsayılanı
+            "usb_eth": "yok",
         }
         
         # Tüm varsayılan ayarları tek bir sözlükte birleştir
@@ -111,16 +114,6 @@ class Manager:
     def validate_input(self, key: str, value: str) -> str:
         """
         Kullanıcı girdisini belirtilen tipe göre doğrular. Güvenlik ve mantıksal kontroller yapar.
-
-        Args:
-            key (str): Kontrol edilen ayarın anahtar kelimesi.
-            value (str): Kullanıcıdan gelen değer.
-
-        Raises:
-            ValueError: Değer istenen kurallara veya formata uymuyorsa.
-
-        Returns:
-            str: Doğrulanmış değer.
         """
         value = value.strip()
         if not value and key not in OPTIONAL_FIELDS:
@@ -143,7 +136,12 @@ class Manager:
                 raise ValueError("Lütfen 'evet' veya 'hayır' giriniz.")
             return value
 
-        if key in ("mac_address", "tvplus_stb_mac"):
+        if key == "iptv_mode":
+            if value.lower() not in ("proxy", "bridge", "köprü"):
+                raise ValueError("IPTV modu 'proxy' veya 'bridge' olabilir.")
+            return "bridge" if value.lower() == "köprü" else value.lower()
+
+        if key in ("mac_address", "tvplus_stb_mac", "wan_mac_address"):
             if not value:
                 return ""
             if not REGEX_MAC.match(value):
@@ -196,15 +194,7 @@ class Manager:
         return value
 
     def check_conflicts(self, config: Dict[str, str]) -> None:
-        """
-        Kullanıcının girdiği yapılandırmada çakışma (conflict) kontrolü yapar.
-
-        Args:
-            config (Dict[str, str]): Yapılandırma sözlüğü.
-
-        Raises:
-            ValueError: Mantıksal bir çakışma bulunursa.
-        """
+        """Kullanıcının girdiği yapılandırmada çakışma (conflict) kontrolü yapar."""
         iptv = config.get("iptv_interface", "")
         lan = config.get("lan_interface", "")
         lz = config.get("lan_zone", "")
@@ -217,8 +207,6 @@ class Manager:
         if lz and tz and lz == tz:
             raise ValueError("LAN ve TV zone isimleri aynı olamaz!")
 
-
-        # Kullanılan portların birbirleriyle çakışıp çakışmadığını kontrol et
         ports = []
         for pk in ("agh_dns_port", "agh_web_port", "hdnsp_port"):
             pv = config.get(pk, "")
@@ -230,28 +218,41 @@ class Manager:
     # --- TV+ İşlemleri ---
     def generate_tvplus_setup(self, config: Dict[str, str]) -> str:
         """TV+ Kurulum shell betiğini oluşturur."""
-        script = TVPLUS_SETUP_TEMPLATE
-        hostname_hex = ""
+        iptv_mode = config.get("iptv_mode", "bridge").strip().lower()
+        tv_eth2 = config.get("tv_eth2_port", "").strip()
+
+        # Eğer bridge modu seçildiyse L2 Bridge şablonunu kullan
+        if iptv_mode in ("bridge", "köprü"):
+            if not tv_eth2:
+                raise ValueError("L2 Bridge modu için fiziksel bir TV portu (örn: eth2) belirtilmelidir!")
+            script = TVPLUS_L2_SETUP_TEMPLATE
+        else:
+            # Proxy modu
+            script = TVPLUS_SETUP_TEMPLATE
+
+        # Hostname hex encode
         raw = config.get("host_name", "")
-        if raw:
-            hostname_hex = binascii.hexlify(raw.encode("utf-8")).decode("utf-8")
-        for key, val in config.items():
-            script = script.replace(f"<<{key.upper()}>>", str(val))
+        hostname_hex = binascii.hexlify(raw.encode("utf-8")).decode("utf-8") if raw else ""
         script = script.replace("<<HOST_NAME_HEX>>", hostname_hex)
         script = script.replace("<<USB_FIX_SERVICE>>", USB_FIX_SERVICE)
-        # eth2 izolasyon bloğunu render et
-        tv_eth2 = config.get("tv_eth2_port", "").strip()
-        if tv_eth2:
-            eth2_block = self._render_eth2_block(tv_eth2, config)
-        else:
-            eth2_block = '    echo "    > Ayrı TV portu belirtilmedi — TV br-lan üzerinden bağlanır."'
-        script = script.replace("<<TV_ETH2_BLOCK>>", eth2_block)
+
+        # Proxy modunda eth2 subnet izolasyonu istenmişse
+        if iptv_mode not in ("bridge", "köprü"):
+            if tv_eth2:
+                eth2_block = self._render_eth2_block(tv_eth2, config)
+            else:
+                eth2_block = '    echo "    > Ayrı TV portu belirtilmedi — TV br-lan üzerinden proxy edilecek."'
+            script = script.replace("<<TV_ETH2_BLOCK>>", eth2_block)
+
+        # Değişkenleri yerleştir
+        for key, val in config.items():
+            script = script.replace(f"<<{key.upper()}>>", str(val))
+
         return self._render(script)
 
     def _render_eth2_block(self, eth2_port: str, config: Dict[str, str]) -> str:
-        """TV için izole subnet bloğu üretir (eth2 varsa)."""
+        """TV için izole subnet bloğu üretir (Yalnızca proxy modu için)."""
         tv_zone = config.get("tv_zone_name", "tvplus_iptv_zone")
-        lan_iface = config.get("lan_interface", "lan")
         return f"""    # --- İzole TV Subnet ({eth2_port}) ---
     echo "    > {eth2_port} bulundu — TV izole subnet (192.168.2.0/24) kuruluyor..."
 
@@ -261,13 +262,11 @@ class Manager:
         DEV_NAME=$(uci -q get "network.@device[$LAN_DEV_IDX].name" 2>/dev/null)
         if [ "$DEV_NAME" = "br-lan" ]; then
             uci -q del_list "network.@device[$LAN_DEV_IDX].ports"="{eth2_port}" 2>/dev/null || true
-            echo "    > {eth2_port} br-lan'dan çıkarıldı."
             break
         fi
         LAN_DEV_IDX=$((LAN_DEV_IDX+1))
     done
 
-    # br-tv bridge
     uci delete network.br_tv 2>/dev/null || true
     uci set network.br_tv=device
     uci set network.br_tv.name='br-tv'
@@ -282,16 +281,13 @@ class Manager:
     uci set network.tv_lan.ipaddr='192.168.2.1'
     uci set network.tv_lan.netmask='255.255.255.0'
 
-    # DHCP
     uci delete dhcp.tv_lan 2>/dev/null || true
     uci set dhcp.tv_lan=dhcp
     uci set dhcp.tv_lan.interface='tv_lan'
     uci set dhcp.tv_lan.start='100'
     uci set dhcp.tv_lan.limit='50'
     uci set dhcp.tv_lan.leasetime='12h'
-    echo "    > TV DHCP: 192.168.2.100-150"
 
-    # Firewall: TV zone (tv_lan + {tv_zone}) → wan ACCEPT, → lan REJECT
     uci delete firewall.tv_lan_zone 2>/dev/null || true
     uci set firewall.tv_lan_zone=zone
     uci set firewall.tv_lan_zone.name='tv_lan'
@@ -300,42 +296,49 @@ class Manager:
     uci set firewall.tv_lan_zone.output='ACCEPT'
     uci set firewall.tv_lan_zone.forward='REJECT'
     uci set firewall.tv_lan_zone.masq='1'
-    uci set firewall.tv_lan_zone.mtu_fix='1'
 
     uci delete firewall.tv_lan_to_wan 2>/dev/null || true
     uci set firewall.tv_lan_to_wan=forwarding
     uci set firewall.tv_lan_to_wan.src='tv_lan'
     uci set firewall.tv_lan_to_wan.dest='wan'
 
-    # tv_lan → IPTV zone: NTP (176.235.7.x) ve portal (10.31.x.x, 172.31.x.x)
-    # için gerekli — proxy hotplug bu rotaları router tablosuna ekler,
-    # firewall izni olmadan paket düşer.
     uci delete firewall.tv_lan_to_iptv 2>/dev/null || true
     uci set firewall.tv_lan_to_iptv=forwarding
     uci set firewall.tv_lan_to_iptv.src='tv_lan'
     uci set firewall.tv_lan_to_iptv.dest='{tv_zone}'
-    echo "    > tv_lan → IPTV zone forwarding eklendi (NTP+portal rotaları için)"
 
-    # igmpproxy downstream → br-tv (LAN yerine)
-    # igmpproxy downstream phyint'ini index yerine direction ile bul — güvenli
+    uci delete firewall.tv_lan_igmp_rule 2>/dev/null || true
+    uci set firewall.tv_lan_igmp_rule=rule
+    uci set firewall.tv_lan_igmp_rule.name='Allow-IGMP-TV-Iso'
+    uci set firewall.tv_lan_igmp_rule.src='{tv_zone}'
+    uci set firewall.tv_lan_igmp_rule.dest='tv_lan'
+    uci set firewall.tv_lan_igmp_rule.proto='igmp'
+    uci set firewall.tv_lan_igmp_rule.dest_ip='224.0.0.0/4'
+    uci set firewall.tv_lan_igmp_rule.target='ACCEPT'
+
+    uci delete firewall.tv_lan_udp_rule 2>/dev/null || true
+    uci set firewall.tv_lan_udp_rule=rule
+    uci set firewall.tv_lan_udp_rule.name='Allow-UDP-TV-Iso'
+    uci set firewall.tv_lan_udp_rule.src='{tv_zone}'
+    uci set firewall.tv_lan_udp_rule.dest='tv_lan'
+    uci set firewall.tv_lan_udp_rule.proto='udp'
+    uci set firewall.tv_lan_udp_rule.dest_ip='224.0.0.0/4'
+    uci set firewall.tv_lan_udp_rule.target='ACCEPT'
+
     DS_IDX=0
     while uci -q get "igmpproxy.@phyint[$DS_IDX]" >/dev/null 2>&1; do
         if [ "$(uci -q get igmpproxy.@phyint[$DS_IDX].direction 2>/dev/null)" = "downstream" ]; then
             uci set igmpproxy.@phyint[$DS_IDX].network='tv_lan'
             uci set igmpproxy.@phyint[$DS_IDX].zone='tv_lan'
-            echo "    > IGMP Proxy downstream [phyint $DS_IDX]: tv_lan (br-tv/{eth2_port})"
             break
         fi
         DS_IDX=$((DS_IDX+1))
     done
-    # DNS rebind whitelist: superonlinetv.com domainleri tv_lan zone için de açılmalı
-    # Aksi hâlde dnsmasq private IP döndüren DNS yanıtlarını bloklar → portal açılmaz
+
     for domain in superonline.net superonline.com superonlinetv.com ims.superonline.com; do
         uci -q del_list dhcp.@dnsmasq[0].rebind_domain="$domain" 2>/dev/null || true
         uci add_list dhcp.@dnsmasq[0].rebind_domain="$domain"
     done
-    echo "    > DNS rebind: superonline domainleri whitelist\'e eklendi"
-    echo "    ✅ TV izole subnet: 192.168.2.0/24 | Masquerade: aktif | LAN erişimi: kapalı"
 """
 
     def generate_tvplus_uninstall(self, config: Dict[str, str]) -> str:
@@ -343,8 +346,8 @@ class Manager:
         script = TVPLUS_UNINSTALL_TEMPLATE
         script = script.replace("<<IPTV_INTERFACE>>", config.get("iptv_interface", "tvplus_iptv"))
         script = script.replace("<<TV_ZONE_NAME>>", config.get("tv_zone_name", "tvplus_iptv_zone"))
+        script = script.replace("<<VLAN_ID>>", config.get("vlan_id", "103"))
         return self._render(script)
-
 
     def generate_dns_setup(self, config: Dict[str, str]) -> str:
         """DNS Zinciri Kurulum shell betiğini oluşturur."""
@@ -390,18 +393,6 @@ class Manager:
         """Tailscale VPN kaldırma betiğini döndürür."""
         return self._render(TAILSCALE_UNINSTALL_TEMPLATE)
 
-    # # --- WAN6 (IPv6) İşlemleri ---
-    # def generate_wan6_setup(self, config: Dict[str, str]) -> str:
-    #     """IPv6 yapılandırma kurulum betiğini oluşturur."""
-    #     script = WAN6_SETUP_TEMPLATE
-    #     script = script.replace("<<IPV6_MODE>>", config.get("ipv6_mode", "kapalı"))
-    #     script = script.replace("<<LAN_IP>>", config.get("lan_ip", "192.168.1.1"))
-    #     return self._render(script)
-
-    # def generate_wan6_uninstall(self, config: Dict[str, str]) -> str:
-    #     """IPv6 kaldırma betiğini döndürür."""
-    #     return self._render(WAN6_UNINSTALL_TEMPLATE)
-
     # --- WAN (PPPoE) İşlemleri ---
     def generate_wan_setup(self, config: Dict[str, str]) -> str:
         """WAN PPPoE kurulum betiğini oluşturur."""
@@ -409,6 +400,7 @@ class Manager:
         for ph, key in [("<<PPPOE_USER>>", "pppoe_user"), ("<<PPPOE_PASS>>", "pppoe_pass"),
                         ("<<LAN_IP>>", "lan_ip"), ("<<IPV6_MODE>>", "ipv6_mode"),
                         ("<<WAN_PHYS>>", "wan_phys"), ("<<WAN_VLAN_ID>>", "wan_vlan_id"),
+                        ("<<WAN_MAC_ADDRESS>>", "wan_mac_address"),
                         ("<<CUSTOM_DNS>>", "custom_dns"),
                         ("<<TIMEZONE>>", "timezone"), ("<<TIMEZONE_CODE>>", "timezone_code"),
                         ("<<USB_ETH>>", "usb_eth")]:
@@ -438,9 +430,7 @@ EOF_USBFIX
         script = WAN_UNINSTALL_TEMPLATE
         # VLAN device temizliği — sadece wan_vlan_id varsa eklenir
         wan_vlan = config.get("wan_vlan_id", "").strip()
-        vlan_cleanup = ""
-        if wan_vlan and wan_vlan != "0":
-            vlan_cleanup = "uci -q delete network.wan_vlan_dev 2>/dev/null || true\n"
+        vlan_cleanup = "uci -q delete network.wan_vlan_dev 2>/dev/null || true\n" if wan_vlan and wan_vlan != "0" else ""
         script = script.replace("<<WAN_VLAN_CLEANUP>>", vlan_cleanup)
         return self._render(script)
 
@@ -473,12 +463,11 @@ EOF_USBFIX
 
     # --- Birleşik Kurulum ---
     def generate_full_setup(self, config: Dict[str, str]) -> str:
-        """Tüm modülleri (WAN + TV+ + DNS Zinciri + Zapret + Tailscale) içeren kapsamlı kurulum betiğini oluşturur."""
+        """Tüm modülleri içeren kapsamlı kurulum betiğini oluşturur."""
         parts = ["#!/bin/sh",
                  "# Komple Kurulum: WAN + TV+ + DNS Zinciri + Zapret + Tailscale",
-                 "# Sıra önemli: WAN önce kurulur (internet bağlantısı), sonra diğerleri.", "",
                  "set -e", "",
-                 'echo "=== KOMPLE KURULUM (WAN + TV+ + DNS + ZAPRET + TAILSCALE) ==="', ""]
+                 'echo "=== KOMPLE KURULUM BAŞLIYOR ==="', ""]
         parts.append('echo "--- ADIM 1/5: WAN (PPPoE + IPv6) ---"')
         parts.append(self._strip_header(self.generate_wan_setup(config)))
         parts.append('echo "--- ADIM 2/5: TV+ IPTV ---"')
@@ -493,8 +482,8 @@ EOF_USBFIX
         return "\n".join(parts)
 
     def generate_full_uninstall(self, config: Dict[str, str]) -> str:
-        """Tüm modülleri kaldıran birleşik betiği oluşturur. Ters sırada kaldırılır."""
-        parts = ["#!/bin/sh", "# Komple Kaldırma (Ters sıra: son kurulan ilk kaldırılır)", "",
+        """Tüm modülleri kaldıran birleşik betiği oluşturur."""
+        parts = ["#!/bin/sh", "# Komple Kaldırma", "",
                  "set -u", "",
                  'echo "=== KOMPLE KALDIRMA ==="']
         parts.append(self._strip_header(self.generate_tailscale_uninstall(config)))
@@ -507,38 +496,23 @@ EOF_USBFIX
 
     @staticmethod
     def _render(script: str) -> str:
-        """
-        Üretilmekte olan shell betiğindeki placeholder'ları
-        compat.py'deki merkezi sabitlerle değiştirir.
-
-        Tüm generate_* metodları return öncesi buradan geçer.
-        """
+        """Yer tutucuları (placeholder) gerçek kodla değiştirir."""
         script = script.replace("<<PKG_MANAGER_BLOCK>>", PKG_MANAGER_BLOCK)
         script = script.replace("<<OPENWRT_GUARD>>", OPENWRT_GUARD)
         return script
 
     @staticmethod
     def _strip_header(script: str) -> str:
-        """
-        Bir shell betiğinin başlık kısmını (# ile başlayan üst yorumlar) temizler.
-        Bu fonksiyon, birden çok betiği tek bir dosyada birleştirmek için kullanılır.
-
-        Args:
-            script (str): Temizlenecek shell betiği metni.
-
-        Returns:
-            str: Başlığı temizlenmiş betik gövdesi.
-        """
+        """Birleşmiş betiklerde gereksiz başlıkları (shebang) temizler."""
         lines = script.split("\n")
         body = []
         in_header = True
         for line in lines:
             s = line.strip()
-            # Başlıktaki shebang, yapılandırma ve özel formatları atla
             if in_header:
-                if s.startswith("#!/") or s.startswith("# ==") or s.startswith("# DOSYA") or \
-                   s.startswith("# ACIKLAMA") or s.startswith("# KONFIG") or \
-                   s.startswith("# MIMARI") or s.startswith("# DNS") or \
+                if s.startswith("#!/") or s.startswith("# == ") or s.startswith("# DOSYA") or \
+                   s.startswith("# ACIKLAMA") or s.startswith("# MOD:") or \
+                   s.startswith("# KONFIG") or s.startswith("# MIMARI") or s.startswith("# DNS") or \
                    s == "set -e" or s == "set -u" or s == "#" or s == "":
                     continue
                 in_header = False

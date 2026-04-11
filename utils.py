@@ -8,9 +8,10 @@ import platform
 import shutil
 import getpass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 try:
+    import paramiko
     from fabric import Connection
     from invoke.exceptions import UnexpectedExit
     FABRIC_AVAILABLE = True
@@ -115,10 +116,16 @@ def deploy_and_run_via_fabric(host: str, local_filepath: str, remote_dir: str = 
     try:
         # Yönlendiriciye bağlantı kur
         with Connection(host=host, user="root", connect_kwargs=connect_kwargs) as conn:
+            
+            if not conn.is_connected:
+                conn.open()
+                
             print(f"  [+] Bağlantı başarılı! Dosya aktarılıyor: {filename}")
             
             with open(local_filepath, "r", encoding="utf-8") as f:
-                conn.run(f"cat > {remote_path}", in_stream=f, hide=True)
+                script_content = f.read()
+            
+            execute_fast_ssh_command(conn.client, f"cat > {remote_path}", script_content)
             
             print("  [+] Çalıştırılabilir (executable) yetkisi veriliyor...")
             conn.run(f"chmod +x {remote_path}", hide=True)
@@ -237,3 +244,51 @@ def detect_platform() -> str:
     elif system == "windows":
         return "windows"
     return "unknown"
+
+
+def execute_fast_ssh_command(ssh_client: 'paramiko.SSHClient', command: str, input_data: str = "") -> Tuple[str, str]:
+    """Uzak sunucuda komut çalıştırır ve büyük verileri maksimum hızda aktarır.
+    
+    Paramiko'nun varsayılan küçük TCP pencere boyutlarını (window size) ve paket 
+    boyutlarını maksimize ederek, 'cat' ile atılan devasa shell betiklerinin
+    veya yapılandırma metinlerinin saniyeler içinde aktarılmasını sağlar.
+    
+    Args:
+        ssh_client (paramiko.SSHClient): Aktif ve doğrulanmış SSH bağlantı nesnesi.
+        command (str): Uzak sunucuda çalıştırılacak komut (örn: 'cat > /tmp/file.sh').
+        input_data (str, optional): Standart girdiye (stdin) basılacak veri. Varsayılan "".
+        
+    Returns:
+        Tuple[str, str]: Komutun standart çıktısı (stdout) ve hata çıktısı (stderr).
+        
+    Raises:
+        RuntimeError: Paramiko kütüphanesi yüklü değilse fırlatılır.
+        paramiko.SSHException: SSH kanalı açılamazsa veya komut işletilemezse fırlatılır.
+    """
+    if not FABRIC_AVAILABLE:
+        raise RuntimeError("HATA: Paramiko/Fabric kütüphanesi yüklü değil. 'pip install paramiko' ile kurunuz.")
+
+    transport = ssh_client.get_transport()
+    if transport is None or not transport.is_active():
+        raise paramiko.SSHException("SSH bağlantısı aktif değil veya transport nesnesi bulunamadı.")
+
+    # Maksimum TCP pencere boyutu (2GB) ve paket boyutu (32KB)
+    channel = transport.open_session(window_size=2147483647, max_packet_size=32768)
+    
+    try:
+        channel.exec_command(command)
+
+        if input_data:
+            channel.sendall(input_data.encode('utf-8'))
+            channel.shutdown_write()
+
+        stdout_file = channel.makefile('r', -1)
+        stderr_file = channel.makefile_stderr('r', -1)
+
+        stdout_text = stdout_file.read()
+        stderr_text = stderr_file.read()
+
+        return stdout_text, stderr_text
+
+    finally:
+        channel.close()

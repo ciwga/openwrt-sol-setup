@@ -138,6 +138,17 @@ def collect_wan_config(mgr: Manager) -> Dict[str, str]:
     config["pppoe_pass"] = ask("PPPoE Şifre")
     config["wan_phys"] = ask("WAN Fiziksel Port", str(d["wan_phys"]))
 
+    print("\n--- WAN MAC Adresi (Klonlama) ---")
+    print("  Superonline gibi bazı ISP'ler internete çıkış (PPPoE) için")
+    print("  orijinal modemin WAN MAC adresini arayabilir.")
+    print("  Emin değilseniz veya gerekmiyorsa boş bırakabilirsiniz.\n")
+    config["wan_mac_address"] = ask(
+        "Orijinal Modem WAN MAC Adresi (boş bırakılabilir)", 
+        str(d.get("wan_mac_address", "")), 
+        mgr.validate_input, 
+        "wan_mac_address"
+    )
+
     print("\n--- WAN VLAN ---")
     print("  Superonline: PPPoE VLAN yok, bölgeye göre değişebilir. Yoksa boş bırakın.")
     print("  Türk Telekom: PPPoE, VLAN 35 üzerinden — '35' girin.")
@@ -177,11 +188,9 @@ def collect_tvplus_config(mgr: Manager) -> Dict[str, str]:
     """
     TV+ IPTV modülü için kullanıcıdan gerekli bilgileri toplar.
 
-    Tek mod: IGMP Proxy
-    İkinci USB adaptör (eth2 vb.) varsa TV kutusu izole subnet'e alınır:
-      - TV 192.168.2.x IP alır, router masquerade yapar
-      - LAN (192.168.1.x) ile TV trafiği birbirinden ayrılır
-      - ACS, NTP, portal — hepsi router PPPoE üzerinden çalışır
+    İki mod desteklenir:
+      - bridge (L2 Köprü): TV portu direkt ISP VLAN'ına köprülenir (Önerilen).
+      - proxy (IGMP Proxy): Geleneksel routing/firewall üzerinden geçirilir.
 
     Args:
         mgr (Manager): Konfigürasyon yöneticisi.
@@ -193,6 +202,12 @@ def collect_tvplus_config(mgr: Manager) -> Dict[str, str]:
     config: Dict[str, str] = {}
 
     print("\n--- TV+ IPTV Ayarları ---")
+    print("\n--- IPTV Mimari Seçimi ---")
+    print("  'bridge': (ÖNERİLEN) OpenWrt aradan çekilir, TV direkt santrale bağlanır. SIFIR DONMA.")
+    print("  'proxy' : (ESKİ) Yönlendirme ve Firewall üzerinden geçer (Sadece tek portlular için).\n")
+    
+    config["iptv_mode"] = ask("IPTV Modu (bridge/proxy)", "bridge", mgr.validate_input, "iptv_mode")
+
     for key, label in [
         ("vlan_id",       "VLAN ID"),
         ("wan_interface", "WAN Fiziksel Portu (ISP'ye bağlı, örn: eth1)"),
@@ -201,18 +216,36 @@ def collect_tvplus_config(mgr: Manager) -> Dict[str, str]:
         ("iptv_interface","IPTV Arayüz İsmi"),
         ("tv_zone_name",  "TV Firewall Zone İsmi"),
         ("igmp_version",  "IGMP Sürümü (2/3)"),
-        ("mac_address",   "Orijinal Modem MAC Adresi"),
-        ("client_id",     "Option 61 Client ID"),
-        ("vendor_id",     "Option 60 Vendor Class ID"),
-        ("host_name",     "Option 12 Hostname"),
     ]:
         config[key] = ask(label, str(d.get(key, "")), mgr.validate_input, key)
 
-    print("\n--- İkinci USB Adaptör (İzolasyon) ---")
-    print("  TV kutusuna bağlı ayrı bir USB Ethernet adaptörünüz varsa")
-    print("  TV izole bir subnet'e (192.168.2.x) alınır.")
-    print("  Yoksa TV LAN'a (192.168.1.x) bağlanır.\n")
-    tv_eth2 = ask("TV için ayrı USB adaptör var mı? Arayüz adı (örn: eth2, yoksa boş bırakın)", "")
+    if config["iptv_mode"] in ("bridge", "köprü"):
+        print("\n--- IPTV Kimlik Bilgileri (MAC Klonlama) ---")
+        print("  ✅ [BİLGİ] 'bridge' (L2 Köprü) modunda DHCP Option klonlamaya gerek yoktur.")
+        print("  Ancak Superonline santrali (OLT) VLAN arayüzünde TV kutunuzun veya Orijinal Modemin")
+        print("  MAC adresini arıyorsa, aşağıya yazabilirsiniz. Gerekmiyorsa BOŞ bırakın.\n")
+        config["mac_address"] = ask("VLAN MAC Adresi (boş bırakılabilir)", "", mgr.validate_input, "mac_address")
+        
+        # Gereksiz DHCP verileri temiz bırakılır
+        config["client_id"] = ""
+        config["vendor_id"] = ""
+        config["host_name"] = ""
+    else:
+        print("\n--- IPTV Kimlik Bilgileri ---")
+        print("  NOT: 'proxy' modunda ISP'yi kandırmak için orijinal modem bilgileri gerekebilir.\n")
+        for key, label in [
+            ("mac_address",   "Orijinal Modem MAC Adresi"),
+            ("client_id",     "Option 61 Client ID"),
+            ("vendor_id",     "Option 60 Vendor Class ID"),
+            ("host_name",     "Option 12 Hostname"),
+        ]:
+            config[key] = ask(label, str(d.get(key, "")), mgr.validate_input, key)
+
+    print("\n--- Fiziksel Port (İzolasyon / Köprü) ---")
+    print("  TV kutusuna bağlı ayrı bir portunuz (örn: eth2) varsa girin.")
+    print("  'bridge' modunda bu port direkt ISP'ye köprülenir (Zorunludur).")
+    print("  'proxy' modunda TV izole subnet'e alınır.\n")
+    tv_eth2 = ask("TV için ayrı port var mı? Arayüz adı (örn: eth2, yoksa boş bırakın)", "")
     config["tv_eth2_port"] = tv_eth2.strip()
 
     print("\n--- IPTV IPv6 ---")
@@ -223,15 +256,18 @@ def collect_tvplus_config(mgr: Manager) -> Dict[str, str]:
     print("  'otomatik' bırakırsanız OpenWrt kendi belirler.\n")
     config["mtu_value"] = ask("IPTV MTU (otomatik/1492/1500)", str(d["mtu_value"]))
 
-    print("\n--- Dinamik Multicast (Altnet) Tespiti ---")
-    print("  IGMP yayınları için 169.254.x.x ve DHCP rotalarındaki IP'ler")
-    print("  bulunduğunda sisteme yük bindirmeden IGMP Proxy'e otomatik eklenir.\n")
-    config["auto_multicast"] = ask(
-        "Otomatik Altnet Ekleme aktif olsun mu? (evet/hayır)",
-        str(d["auto_multicast"]),
-        mgr.validate_input,
-        "auto_multicast",
-    )
+    if config["iptv_mode"] not in ("bridge", "köprü"):
+        print("\n--- Dinamik Multicast (Altnet) Tespiti ---")
+        print("  IGMP yayınları için 169.254.x.x ve DHCP rotalarındaki IP'ler")
+        print("  bulunduğunda sisteme yük bindirmeden IGMP Proxy'e otomatik eklenir.\n")
+        config["auto_multicast"] = ask(
+            "Otomatik Altnet Ekleme aktif olsun mu? (evet/hayır)",
+            str(d["auto_multicast"]),
+            mgr.validate_input,
+            "auto_multicast",
+        )
+    else:
+        config["auto_multicast"] = "hayır"
 
     for key in ("timezone", "timezone_code", "ntp_server"):
         config[key] = str(d[key])
@@ -263,6 +299,7 @@ def collect_dns_config(mgr: Manager) -> Dict[str, str]:
     print("  NOT: TV kutusu izole subnet'teyse (192.168.2.x) IP'yi ona göre girin.")
     print("       Örn: MAC=AA:BB:CC:DD:EE:FF, IP=192.168.2.X\n")
     config["tvplus_stb_mac"] = ask("TV+ kutusu MAC (boş=bypass yok)", str(d["tvplus_stb_mac"]), mgr.validate_input, "tvplus_stb_mac")
+    
     if config["tvplus_stb_mac"]:
         # IP önerisi: TV izole subnet'teyse (192.168.2.x) oradan, değilse LAN'dan
         default_ip = config["lan_ip"].rsplit(".", 1)[0] + ".200" if config["lan_ip"] else "192.168.1.200"
@@ -271,9 +308,11 @@ def collect_dns_config(mgr: Manager) -> Dict[str, str]:
         if not config["isp_dns"]:
             config["isp_dns"] = "213.74.0.1,213.74.1.1"
     else:
+        # MAC boş olsa bile ISP DNS mutlaka dolu olmalıdır, yoksa AdGuard config dosyası YAML hatası verir ve çöker!
         config["tvplus_stb_ip"] = ""
-        config["isp_dns"] = ""
-        print("    > DNS bypass atlandı — TV+ kurulu değil veya bypass gerekmiyor.")
+        config["isp_dns"] = str(d.get("isp_dns", "213.74.0.1,213.74.1.1"))
+        print("    > DNS bypass atlandı — TV+ kurulu değil veya bypass gerekmiyor. (Split-DNS için varsayılan kullanılacak)")
+        
     return config
 
 

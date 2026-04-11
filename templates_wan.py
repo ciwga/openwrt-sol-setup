@@ -12,13 +12,14 @@ Kullanıcıdan alınan bilgiler:
   - Zaman dilimi
   - DNS tercihi (ISP / manuel)
   - USB Ethernet arayüzü (varsa r8152 fix için) (örn: eth1)
+  - Orijinal Modem WAN MAC Adresi (opsiyonel)
 """
 
 from typing import Final
 
 WAN_SETUP_TEMPLATE: Final[str] = r"""#!/bin/sh
 
-set -u # ==============================================================================
+# ==============================================================================
 # setup_wan.sh - PPPoE WAN + IPv6 Kurulumu ve USB Fix
 # Fabrika sıfırlaması sonrası ilk adım
 # ==============================================================================
@@ -32,6 +33,7 @@ LAN_IP="<<LAN_IP>>"
 IPV6_MODE="<<IPV6_MODE>>"
 WAN_PHYS="<<WAN_PHYS>>"
 WAN_VLAN_ID="<<WAN_VLAN_ID>>"
+WAN_MAC_ADDRESS="<<WAN_MAC_ADDRESS>>"
 CUSTOM_DNS="<<CUSTOM_DNS>>"
 USB_ETH="<<USB_ETH>>"
 
@@ -75,6 +77,15 @@ echo "[3/8] PPPoE WAN..."
 uci -q delete network.wan 2>/dev/null || true
 uci -q delete network.wan6 2>/dev/null || true
 
+# Dinamik MAC Klonlama (Fiziksel Cihaz Seviyesinde)
+if [ -n "$WAN_MAC_ADDRESS" ]; then
+    uci -q delete network.wan_phy_dev 2>/dev/null || true
+    uci set network.wan_phy_dev=device
+    uci set network.wan_phy_dev.name="$WAN_PHYS"
+    uci set network.wan_phy_dev.macaddr="$WAN_MAC_ADDRESS"
+    echo "    WAN Fiziksel MAC Klonlandı: $WAN_MAC_ADDRESS"
+fi
+
 # WAN VLAN (opsiyonel — Türk Telekom için VLAN 35, Superonline için boş. Bölgeye göre değişebilir.)
 if [ -n "$WAN_VLAN_ID" ] && [ "$WAN_VLAN_ID" != "0" ]; then
     WAN_DEV_NAME="${WAN_PHYS}.${WAN_VLAN_ID}"
@@ -84,6 +95,7 @@ if [ -n "$WAN_VLAN_ID" ] && [ "$WAN_VLAN_ID" != "0" ]; then
     uci set network.wan_vlan_dev.type='8021q'
     uci set network.wan_vlan_dev.ifname="$WAN_PHYS"
     uci set network.wan_vlan_dev.vid="$WAN_VLAN_ID"
+    [ -n "$WAN_MAC_ADDRESS" ] && uci set network.wan_vlan_dev.macaddr="$WAN_MAC_ADDRESS"
     echo "    WAN: $WAN_DEV_NAME (VLAN $WAN_VLAN_ID)"
 else
     WAN_DEV_NAME="$WAN_PHYS"
@@ -99,6 +111,7 @@ uci set network.wan.password="$PPPOE_PASS"
 uci set network.wan.keepalive='5 3'
 uci set network.wan.mtu='1492'
 uci set network.wan.ipv6='auto'
+[ -n "$WAN_MAC_ADDRESS" ] && uci set network.wan.macaddr="$WAN_MAC_ADDRESS"
 
 # DNS ayarı
 if [ -n "$CUSTOM_DNS" ]; then
@@ -319,7 +332,8 @@ echo "================================================================"
 WAN_UNINSTALL_TEMPLATE: Final[str] = r"""#!/bin/sh
 
 set -e
-set -u # ==============================================================================
+set -u 
+# ==============================================================================
 # uninstall_wan.sh - WAN Ayarlarını Fabrika Varsayılanına Dön
 # ==============================================================================
 
@@ -330,6 +344,7 @@ echo "================================================================"
 echo "[1/4] WAN temizleniyor..."
 uci -q delete network.wan 2>/dev/null || true
 uci -q delete network.wan6 2>/dev/null || true
+uci -q delete network.wan_phy_dev 2>/dev/null || true
 <<WAN_VLAN_CLEANUP>>
 
 # Varsayılan WAN (DHCP)

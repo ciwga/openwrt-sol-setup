@@ -87,8 +87,38 @@ WAN kurulumu bu servisi kurar. TV+ kurulumu üzerine yazar (idempotent).
 ---
 
 ## TV+ IPTV Mimarisi
+Bu araç, donanımınıza bağlı olarak iki farklı IPTV mimarisi sunar.
 
-### IGMP Proxy Modu
+### 1. L2 Bridge (Katman 2 Köprü) Modu (ÖNERİLEN VE KARARLI ÇÖZÜM)
+Eğer TV kutunuz için ayırdığınız fiziksel bir portunuz (örn: eth2) varsa, araç otomatik olarak bu mimariyi kurar. OpenWrt aradan tamamen çekilir ve ISP'den gelen VLAN (örn: 103) sinyalini yazılımsal olarak eth2 portuna "köprüler".
+
+```mermaid
+    flowchart TD
+        ONT["[ISP ONT]"] --- WAN["[eth1]"]
+        
+        subgraph L2_Bridge["L2 Bridge Mimarisi"]
+            WAN --> |VLAN 103 Ayıklanır| VLAN["[eth1.103]"]
+            VLAN --- |KÖPRÜ| BR["[br-iptv]"]
+            BR --- ETH2["[eth2] (Fiziksel TV Portu)"]
+        end
+        
+        ETH2 --- TV["[TV+ Kutusu]"]
+        
+        style L2_Bridge fill:none,stroke:#28a745,stroke-width:2px
+```
+
+**Neden L2 Bridge Kullanmalısınız?**
+
+- Sıfır Donma: Routing, Firewall, IGMP Proxy veya Linux Kernel sınırlarına takılmaz. Yayın asla kesilmez.
+
+- MAC Klonlamaya ya Option Verilerini Girmeye Gerek Yok: TV kutusu direkt ISP santraliyle kendi orijinal donanım MAC adresi üzerinden konuşur.
+
+- Tam İzolasyon: Ev ağınız devasa Multicast video trafiğinden %100 izole edilir.
+
+### 2. IGMP Proxy Modu (Yedek Yöntem)
+Eğer TV kutusunu takabileceğiniz ayrı bir Ethernet portunuz yoksa ve cihazı mecburen ev ağına (LAN) bağlamak zorundaysanız bu mod kullanılır. igmpproxy yazılımı ve özel güvenlik duvarı (Firewall) kuralları ile Multicast yayınları LAN içine aktarılır.
+
+⚠️ Dikkat: Proxy modu, ISP'nin IGMP Yoklama (Query) sunucularındaki IP bloğu asimetrileri nedeniyle kararsız çalışabilir ([Bkz: Bilinen Hatalar](#iptv-hatalari)).
 
 ```mermaid
    flowchart TD
@@ -121,59 +151,20 @@ WAN kurulumu bu servisi kurar. TV+ kurulumu üzerine yazar (idempotent).
     style TV_BOX fill:none,stroke:#333,stroke-dasharray: 5 5
 ```
 
-### eth2 Olmadan — Neden Donma Olur?
 
-TV kutusu LAN'da (192.168.1.x) olduğunda harici router da aynı `br-lan`'dadır. Sorunlar:
+#### <a id="iptv-hatalari"></a>⚠️ Bilinen Hatalar ve Çözümler
+1. TV+ Yayınının 2-3 Dakika Sonra Kesilmesi / Donması
 
-1. **Multicast flood:** IGMP Snooping eksik veya yetersiz çalışırsa IPTV multicastı tüm LAN portlarına (harici router dahil) gider. 4–8 Mbps'lik sürekli multicast trafiği diğer cihazları etkiler.
+    - Bu sorun yalnızca IGMP Proxy modunda kurulduğunda yaşanabilir.
 
-2. **quickleave=1 tuzağı:** Superonline upstream router ~125 (?) saniyede bir IGMP General Query gönderir. `quickleave=1` ile igmpproxy TV'nin cevabını beklemeden üyeliği siler → stream kesilir → kanal değiştirmek zorunlu kalır.
+    **Sebep:** ISP'nin santrali (OLT) kanalı açtığınızda yayını gönderir ancak yaklaşık ~125 saniyede bir "Hala izliyor musun?" diye bir IGMP Query (Yoklama) paketi yollar. Sorun şudur ki; Superonline bazen bu sorguyu sizin IPTV IP bloğunuzdan tamamen farklı, alakasız bir IP adresinden gönderir.
+    Linux çekirdeği güvenlik sebebiyle alt ağında olmayan bu paketi "sahte" sanıp düşürür. Router'ınız cevap veremediği için santral izlemediğinizi sanıp 3. dakikada yayını kökünden keser.
 
-3. **MDB tutarsızlığı:** RPi5'in tek dahili portu nedeniyle br-lan üzerinde igmpproxy downstream zone'u membership report'ları zaman zaman atlayabilir.
+    **Çözümler:**
 
-Bu proje `quickleave=0` kullanır. Fakat br-lan tabanlı kurulumda risk tamamen ortadan kalkmaz.
+    - Kesin Çözüm (Tavsiye Edilen): 2. USB çevirici adaptörü (USB 3.0 Ethernet — Realtek RTL8156B) alın ve main.py üzerinden TV+ modülünü tekrar kurun ve mimari olarak L2 Bridge modunu seçin. Bu yöntem Linux çekirdeğini aradan çıkardığı için donma imkansız hale gelir.
 
-- `eth2` olmadan (TV br-lan'da) kurulumda `quickleave=0` ile risk azalır ancak
-br-lan MDB tablosu membership report'ları zaman zaman atlayabileceğinden
-eth2 ile izole kurulum önerilir.
-
-### eth2 Varsa — Neden Çalışır?
-
-```mermaid
-    flowchart TD
-    %% Fiziksel Katman
-    TVK["[TV+ Kutusu]<br/>(Direkt Kablo)"] --- ETH2["[eth2]<br/>(Fiziksel Arayüz)"]
-
-    %% Mantıksal İzolasyon Katmanı
-    subgraph Isolation_Zone["Mantıksal İzolasyon"]
-        ETH2 --- BRTV["[br-tv]<br/>(Ayrı Bridge - LAN'dan İzole)"]
-        BRTV --- TVLAN["[tv_lan]<br/>(Subnet: 192.168.2.0/24)"]
-    end
-
-    %% IGMP / Multicast Katmanı
-    TVLAN --- IGMP["[igmpproxy]<br/>downstream = tv_lan"]
-
-    %% Alt Not
-    IGMP --- NOTE["(Doğru Zone: Membership Report Kaybolmaz)"]
-
-    %% Stil: Sade ve Keskin
-    style Isolation_Zone fill:none,stroke:#333,stroke-dasharray: 5 5
-    style TVK fill:none,stroke:#333,stroke-width:2px
-    style NOTE fill:none,stroke:none
-```
-
-- Multicast yalnızca `br-tv` segmentine gider, harici router etkilenmez
-- igmpproxy `tv_lan` zone'unu downstream olarak görür, Join/Leave mesajlarını doğru yakalar
-- Firewall: `tv_lan → wan` ACCEPT (masquerade), `tv_lan → lan` REJECT (TV kutusu LAN'a erişemez)
-
-### Statik Rotalar — Neden Zorunlu?
-
-Superonline DHCP sunucusu Option 121 (classless static routes) göndermez. TV sunucuları (`10.31.0.0/16`, `172.31.128.0/19`, `176.43.0.0/24`) PPPoE varsayılan rotasıyla erişilemez, sadece IPTV VLAN gateway'i (`eth1.103`) üzerinden ulaşılabilir.
-
-Hotplug betiği (`99-tvplus-calc`) her `ifup`'ta:
-- IPTV gateway'ini DHCP'den öğrenir (Option 3 veya hesaplar)
-- IPTV sunucu bloklarını bu gateway üzerinden route eder
-- `176.235.7.0/24` (Superonline NTP) istisna rotasını ekler — TV kutusunun saat senkronizasyonu için kritik
+    - Geçici Çözüm (Timeshift Hilesi): TV kumandanızdan yayını canlı izlemek yerine 1-2 saniye geriye sarın. Geriye sardığınızda yayın Multicast (UDP) formundan çıkıp VOD Unicast (TCP) formuna döner. Unicast paketler çift yönlü ve oturumlu olduğu için IGMP sorgularına ihtiyaç duymaz, yayın asla kesilmez.
 
 ---
 
@@ -216,26 +207,6 @@ Her adımdan sonra sorun çıkarsa `uninstall_*.sh` ile geri alabilirsin.
 
 ---
 
-## Güvenlik
-
-### Tailscale Güvenlik Notları
-
-Tailscale zone firewall'ı `forward=REJECT` olarak yapılandırılmıştır. İzinler yalnızca explicit forwarding kurallarıyla verilir:
-
-| Kural | Yön | Açıklama |
-|-------|-----|----------|
-| `ts_to_lan` | Tailscale → LAN | Uzaktan LAN'a erişim |
-| `lan_to_ts` | LAN → Tailscale | LAN'dan Tailscale'e erişim |
-| `ts_to_wan` | Tailscale → WAN | Sadece exit node aktifse |
-
-Subnet route ve exit node Tailscale admin panelinden ayrıca onaylanmalıdır.
-
-### Üretilen Betiklerin Güvenliği
-
-Betikler `/tmp/` veya `kurulum_dosyalari/` klasörüne yazılır. OpenWrt'e yüklendikten sonra `/tmp/` içindekiler reboot'ta silinir. `kurulum_dosyalari/` içindekileri elle silmeniz önerilir.
-
----
-
 ## Kullanım
 
 **Gereksinim:** `python3`
@@ -251,24 +222,6 @@ cat kurulum_dosyalari/setup_wan.sh | ssh root@192.168.1.1 \
   "cat > /tmp/s.sh && chmod +x /tmp/s.sh && /tmp/s.sh"
 ```
 
----
-
-## Dosya Yapısı
-
-```
-├── main.py                # CLI arayüzü
-├── manager.py             # Konfigürasyon yönetimi ve betik üretimi
-├── compat.py              # Paket yöneticisi uyumluluğu + USB r8152 boot fix servisi
-├── templates_wan.py       # PPPoE, IPv6, USB boot fix
-├── templates_tvplus.py    # TV+ IPTV (igmpproxy, rotalar, eth2 izolasyon)
-├── templates_dns.py       # AdGuard + DoH + Split-DNS
-├── templates_zapret.py    # DPI bypass (nfqws)
-├── templates_tailscale.py # Tailscale VPN
-├── templates_ipv6.py      # IPv6 aç/kapat
-├── templates_disk.py      # Disk genişletme + Argon fan
-├── utils.py               # Yardımcı fonksiyonlar
-└── README.md
-```
 
 ---
 
@@ -322,24 +275,6 @@ Superonline abonesi olup OpenWrt kullanan herhangi bir router'da WAN + TV+ + DNS
 
 ---
 
-## Superonline Dışı ISP'ler İçin Kullanım
-
-Bu proje Superonline için geliştirildi, ancak altyapı tasarımı standart PPPoE + VLAN + IGMP mimarisine dayanır. Diğer ISP'ler de benzer yapı kullanıyorsa çalışır — ayarlanması gereken birkaç parametre vardır.
-
-### Türkiye'deki Yaygın ISP'ler
-
-| ISP | PPPoE | IPTV VLAN | IGMP | Notlar |
-|-----|-------|-----------|------|--------|
-| Superonline | ✅ | 103 | v2 | Bu proje için optimize |
-| Türk Telekom (TTNET) | ✅ | 35 (yaygın) | v2/v3 | DHCP option'ları farklı |
-| TurkNet | ✅ | ISP'ye göre | v2 | |
-| Vodafone TR | ✅ | Bölgeye göre | v2 | |
-| Millenicom | ✅ | ISP'ye göre | v2 | |
-
-> **Not:** VLAN ID'ler bölgeye ve altyapıya göre değişebilir. Kesin değeri ISP'nizin teknik desteğinden veya eski modem/router'ınızın VLAN ayarlarından öğrenebilirsiniz.
-
-### Hangi Parametreler Değişmeli?
-
 #### 1. WAN VLAN ID ve IPTV VLAN ID
 
 Superonline'da PPPoE direkt fiziksel port üzerinden gelir — WAN için VLAN yok.
@@ -348,13 +283,9 @@ Türk Telekom ve bazı diğer ISP'lerde hem internet hem IPTV VLAN'lı gelir.
 | ISP | WAN VLAN | IPTV VLAN | Not |
 |-----|----------|-----------|-----|
 | Superonline | — (direkt) | 103 | WAN direkt eth1, IPTV eth1.103 |
-| Türk Telekom | 35 (yaygın) | 55 (yaygın) | WAN eth0.35, IPTV eth0.55 |
-| TurkNet | 35 | 55 | Türk Telekom altyapısı |
-| Vodafone TR | Bölgeye göre | Bölgeye göre | ISP'den öğrenin |
 
 CLI WAN kurulumunda `WAN VLAN ID` sorulur:
 - Superonline → boş bırakın
-- Türk Telekom → `35` girin
 
 Girilen ID'ye göre `eth0.35` gibi 802.1q subinterface otomatik oluşturulur,
 PPPoE bu device üzerinden kurulur. IPTV VLAN ID ise TV+ kurulumunda ayrıca sorulur.
@@ -372,38 +303,6 @@ Bazı ISP'ler IPTV servisini tanımak için orijinal modem/kutunun DHCP kimliği
 
 Eğer ISP'niz bu bilgileri kontrol etmiyorsa boş bırakabilirsiniz.
 
-#### 3. IGMP Proxy Altnet Listesi
-
-Her ISP'nin IPTV sunucuları farklı IP bloklarında bulunur. Superonline için:
-
-```
-225.0.0.0/8   — multicast stream
-233.0.0.0/8   — multicast stream
-10.31.0.0/16  — portal, EPG sunucuları
-172.31.128.0/19 — stream sunucuları
-176.43.0.0/24 — portal
-176.235.7.0/24 — NTP
-```
-
-Diğer ISP'ler için doğru altnet listesini bulmak için eski modem/router'da tcpdump ile IPTV trafiğini yakalayabilirsiniz.
-
-Görünen IP bloklarını `igmpproxy` altnet listesine ekleyin.
-
-#### 4. Statik Rotalar
-
-`99-tvplus-calc` hotplug betiği `10.31.0.0/16`, `172.31.128.0/19`, `176.43.0.0/24`, `176.235.7.0/24` rotalarını sabit olarak ekler. Bunlar Superonline'a özgü. Başka bir ISP kullanıyorsanız `templates_tvplus.py` içindeki hotplug bölümündeki rota listesini kendi ISP bloklarınıza göre düzenlemeniz gerekir.
-
-### Genel Yaklaşım: Yeni ISP için Nasıl Uyarlanır?
-
-1. **Eski modem/router'ı bir kenara bırakmadan önce** Wireshark veya tcpdump ile IPTV trafiğini yakalayın — VLAN ID, DHCP option'ları ve hedef IP blokları bu şekilde öğrenilir.
-
-2. `python3 main.py` → TV+ modülünü seçin → kendi ISP parametrelerinizi girin.
-
-3. Kurulum sonrası `logread | grep IPTV_LOG` ile hotplug'ın doğru gateway'i bulup rota eklediğini doğrulayın.
-
-4. Altnet listesi yetersizse `/etc/hotplug.d/iface/99-tvplus-calc` içine ISP'nize özgü blokları ekleyin.
-
----
 
 ## Referanslar
 

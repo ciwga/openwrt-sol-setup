@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Tailscale VPN shell script şablonları.
-
-Özellikler:
-  - Tailscale kurulumu (opkg/apk)
-  - Subnet router (LAN'a uzaktan erişim)
-  - Exit node (uzaktan ağ interneti kullanma)
-  - Wake-on-LAN (etherwake ile cihaz açma)
-"""
+"""Tailscale VPN shell script şablonları."""
 
 from typing import Final
 
@@ -39,7 +32,7 @@ echo "[1/5] Paketler... ($PKG_MANAGER)"
 
 pkg_update >/dev/null 2>&1 || true
 
-# ÖNEMLİ DÜZELTME: nftables altyapısı kullanan güncel OpenWrt sürümlerinde 
+# nftables altyapısı kullanan güncel OpenWrt sürümlerinde 
 # tailscaled servisinin çökmesini önlemek için 'ip6tables-nft' paketi listeye eklendi.
 for pkg in tailscale iptables-nft ip6tables-nft etherwake; do
     if pkg_is_installed "$pkg"; then
@@ -53,8 +46,115 @@ for pkg in tailscale iptables-nft ip6tables-nft etherwake; do
     fi
 done
 
-# --- 2. TAILSCALE SERVİSİ ---
-echo "[2/5] Tailscale servisi..."
+# --- 2. ÇEKİRDEK (KERNEL) YAPILANDIRMASI ---
+echo "[2/5] Çekirdek ayarları (IP Yönlendirme)..."
+
+# Tailscale'in subnet advertise edebilmesi için (IP yönlendirmesi),
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-tailscale.conf
+echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-tailscale.conf
+sysctl -p /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true
+
+
+# --- 3. NETWORK VE FIREWALL ÖN YAPILANDIRMASI ---
+# Tailscale servisi başlamadan önce network ve firewall 
+# kuralları tanımlanmalı ve uygulanmalıdır. Böylece tailscale0 arayüzü
+# dinamik olarak oluştuğu anda OpenWrt onu doğru bölgeye (zone) dahil edebilir.
+echo "[3/5] Network ve Firewall ayarları hazırlanıyor..."
+
+# 3.1 Network arayüzü tanımlama
+uci -q delete network.tailscale 2>/dev/null || true
+uci set network.tailscale=interface
+uci set network.tailscale.proto='none'
+uci set network.tailscale.device='tailscale0'
+uci commit network
+/etc/init.d/network reload 2>/dev/null || true
+sleep 2
+
+# 3.2 Firewall arayüzü için zone oluştur
+uci -q delete firewall.tailscale_zone 2>/dev/null || true
+uci set firewall.tailscale_zone=zone
+uci set firewall.tailscale_zone.name='tailscale'
+uci set firewall.tailscale_zone.network='tailscale'
+uci add_list firewall.tailscale_zone.device='tailscale0'
+
+# Arayüz içi trafik kuralları
+uci set firewall.tailscale_zone.input='ACCEPT'
+uci set firewall.tailscale_zone.output='ACCEPT'
+# Bağlantı kopmalarını (erişilememezliği) engellemek için
+# REJECT olan forward ayarı ACCEPT olarak değiştirildi.
+uci set firewall.tailscale_zone.forward='ACCEPT'
+uci set firewall.tailscale_zone.masq='1'
+
+# Tailscale -> LAN yönlendirme
+uci -q delete firewall.ts_to_lan 2>/dev/null || true
+uci set firewall.ts_to_lan=forwarding
+uci set firewall.ts_to_lan.src='tailscale'
+uci set firewall.ts_to_lan.dest='lan'
+uci set firewall.ts_to_lan.mtu_fix='1'
+
+# LAN -> Tailscale yönlendirme
+uci -q delete firewall.lan_to_ts 2>/dev/null || true
+uci set firewall.lan_to_ts=forwarding
+uci set firewall.lan_to_ts.src='lan'
+uci set firewall.lan_to_ts.dest='tailscale'
+uci set firewall.lan_to_ts.mtu_fix='1'
+ 
+# Tailscale -> WAN
+if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
+    uci -q delete firewall.ts_to_wan 2>/dev/null || true
+    uci set firewall.ts_to_wan=forwarding
+    uci set firewall.ts_to_wan.src='tailscale'
+    uci set firewall.ts_to_wan.dest='wan'
+    uci set firewall.ts_to_wan.mtu_fix='1'
+fi
+
+# 3.3 Firewall Trafik Kuralları (Traffic Rules)
+# Sadece arayüz yönlendirmeleri (forwarding) bazen nftables
+# tarafından yoksayılabilir.
+
+# Kural 1: WAN üzerinden Tailscale iletişim portuna (UDP 41641) izin ver. (P2P doğrudan bağlantı için şart)
+uci -q delete firewall.tailscale_wan_udp 2>/dev/null || true
+uci set firewall.tailscale_wan_udp=rule
+uci set firewall.tailscale_wan_udp.name='Allow-Tailscale-WAN-UDP'
+uci set firewall.tailscale_wan_udp.src='wan'
+uci set firewall.tailscale_wan_udp.dest_port='41641'
+uci set firewall.tailscale_wan_udp.proto='udp'
+uci set firewall.tailscale_wan_udp.target='ACCEPT'
+
+# Kural 2: Tailscale'den LAN'a gelen tüm trafiğe açıkça izin ver (Drop sorunlarını önler)
+uci -q delete firewall.tailscale_in 2>/dev/null || true
+uci set firewall.tailscale_in=rule
+uci set firewall.tailscale_in.name='Allow-Tailscale-To-LAN'
+uci set firewall.tailscale_in.src='tailscale'
+uci set firewall.tailscale_in.dest='lan'
+uci set firewall.tailscale_in.target='ACCEPT'
+
+# Kural 3: LAN'dan Tailscale'e giden tüm trafiğe açıkça izin ver
+uci -q delete firewall.tailscale_out 2>/dev/null || true
+uci set firewall.tailscale_out=rule
+uci set firewall.tailscale_out.name='Allow-LAN-To-Tailscale'
+uci set firewall.tailscale_out.src='lan'
+uci set firewall.tailscale_out.dest='tailscale'
+uci set firewall.tailscale_out.target='ACCEPT'
+
+uci commit firewall
+/etc/init.d/firewall restart 2>/dev/null || true
+echo "    Network ve Firewall OK (Traffic Rules eklendi)"
+
+
+# --- 4. DNSMASQ BYPASS ---
+echo "[4/5] dnsmasq ayarları..."
+for domain in tailscale.com ts.net tailscaled.net; do
+    uci -q del_list dhcp.@dnsmasq[0].server="/$domain/213.74.0.1" 2>/dev/null || true
+    uci add_list dhcp.@dnsmasq[0].server="/$domain/213.74.0.1"
+done
+uci commit dhcp
+/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+echo "    ✅ Tailscale domain'leri (dnsmasq) ISP DNS'e yönlendirildi."
+
+
+# --- 5. TAILSCALE SERVİSİ VE GİRİŞ ---
+echo "[5/5] Tailscale servisi başlatılıyor..."
 
 /etc/init.d/tailscale enable 2>/dev/null || true
 /etc/init.d/tailscale start 2>/dev/null || true
@@ -67,27 +167,20 @@ if ! pidof tailscaled >/dev/null 2>&1; then
     sleep 5
 fi
 
-echo "    tailscaled çalışıyor"
-
-# --- 3. TAILSCALE GİRİŞ ---
-echo "[3/5] Tailscale giriş..."
-
 # Auth key ile otomatik login işlemleri
-# Güvenlik notu: TS_AUTHKEY çevresel değişkeni (environment variable) kullanıldıktan hemen sonra temizlenmelidir.
 export TS_AUTHKEY="$TAILSCALE_AUTH_KEY"
-TS_ARGS="--auth-key=$TS_AUTHKEY"
+TS_ARGS="--auth-key=$TS_AUTHKEY --reset"
 TS_ARGS="$TS_ARGS --advertise-routes=$LAN_SUBNET"
 TS_ARGS="$TS_ARGS --accept-routes"
 TS_ARGS="$TS_ARGS --snat-subnet-routes=true"
 
-if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
-    TS_ARGS="$TS_ARGS --advertise-exit-node"
-    echo "    Exit node: AKTİF"
-fi
-
+# =================================================================================
+# DNS LOOP engellemesi ve Dinamik Kabul (Accept DNS)
+# =================================================================================
 if [ "$ACCEPT_DNS" = "hayır" ]; then
     TS_ARGS="$TS_ARGS --accept-dns=false"
-    echo "    Tailscale DNS: KAPALI (mevcut DNS korunuyor)"
+    echo "    Tailscale DNS: KAPALI (Router'ın kendi DNS ayarları DNS Loop koruması için korundu)"
+    
     if [ -n "$TAILNET_NAME" ]; then
         uci -q del_list dhcp.@dnsmasq[0].server="/$TAILNET_NAME/100.100.100.100" 2>/dev/null || true
         uci add_list dhcp.@dnsmasq[0].server="/$TAILNET_NAME/100.100.100.100"
@@ -95,14 +188,23 @@ if [ "$ACCEPT_DNS" = "hayır" ]; then
         uci add_list dhcp.@dnsmasq[0].rebind_domain="$TAILNET_NAME"
         uci commit dhcp
         /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-        echo "    MagicDNS: $TAILNET_NAME -> 100.100.100.100 (dnsmasq)"
+        echo "    MagicDNS: $TAILNET_NAME -> 100.100.100.100 (dnsmasq bypass aktif)"
     else
         echo "    MagicDNS: tailnet adi belirtilmedi, hostname cozumu devre disi."
     fi
 else
-    echo "    Tailscale DNS: AKTiF (MagicDNS Tailscale tarafindan yonetilecek)"
+    # Eğer kullanıcı Accept DNS'i evet seçerse, Tailscale'in DNS'ini kabul et
+    echo "    Tailscale DNS: AKTİF (MagicDNS Tailscale tarafından yönetilecek)"
+    echo "    ⚠️ BİLGİ: Accept DNS 'evet' seçildi. Eğer AdGuard kullanıyorsanız,"
+    echo "    DNS Loop riskine karşı lütfen kurulum sonundaki ayarları unutmayın!"
 fi
 
+if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
+    TS_ARGS="$TS_ARGS --advertise-exit-node"
+    echo "    Exit node: AKTİF"
+fi
+
+echo "    Tailscale ağına bağlanılıyor..."
 tailscale up $TS_ARGS 2>&1
 TS_UP_EXIT=$?
 
@@ -118,82 +220,15 @@ fi
 sleep 2
 echo "    Tailscale bağlandı"
 
-# --- 3.5: ADGUARD WHITELIST ---
-# AdGuard kuruluysa tailscale.com domain'lerini whitelist'e ekle.
-# Aksi hâlde AdGuard Tailscale'in log/koordinasyon sunucularını bloklar
-# → sertifika hatası → DERP relay bağlantısı kopar → shared cihazlar ulaşamaz.
+# --- 5.1: TAILSCALE GÜNCELLEME VE BINARY HATASI DÜZELTMESİ ---
+echo "    Tailscale otomatik güncellemeleri OpenWrt kararlılığı için kapatılıyor..."
+tailscale set --auto-update=false 2>/dev/null || true
 
-# Tailscale domain'lerini dnsmasq'a yaz — AdGuard varsa da yoksa da çalışır.
-# AdGuard DNS sorgularını dnsmasq'a iletir; server direktifleri önce işlenir.
-for domain in tailscale.com ts.net tailscaled.net; do
-    uci -q del_list dhcp.@dnsmasq[0].server="/$domain/213.74.0.1" 2>/dev/null || true
-    uci add_list dhcp.@dnsmasq[0].server="/$domain/213.74.0.1"
-done
-uci commit dhcp
-/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-echo "    ✅ Tailscale domain'leri ISP DNS'e yönlendirildi."
-
-# --- 4. FIREWALL ---
-echo "[4/5] Firewall ayarları..."
-
-# Tailscale arayüzü için zone oluştur
-uci -q delete firewall.tailscale_zone 2>/dev/null || true
-uci set firewall.tailscale_zone=zone
-uci set firewall.tailscale_zone.name='tailscale'
-
-# ÖNEMLİ DÜZELTME: Tailscale ağındaki cihazların (örn. telefonunuz) 
-# OpenWrt üzerindeki DNS sunucusuna (AdGuard) erişebilmesi için input 'ACCEPT' olarak değiştirildi.
-uci set firewall.tailscale_zone.input='ACCEPT'
-
-uci set firewall.tailscale_zone.output='ACCEPT'
-uci set firewall.tailscale_zone.forward='REJECT'
-# forward=REJECT — izinler explicit forwarding kurallarıyla verilir (ts_to_lan, ts_to_wan)
-uci set firewall.tailscale_zone.masq='1'
-uci set firewall.tailscale_zone.network='tailscale'
-uci add_list firewall.tailscale_zone.device='tailscale0'
-
-# Tailscale -> LAN yönlendirme
-uci -q delete firewall.ts_to_lan 2>/dev/null || true
-uci set firewall.ts_to_lan=forwarding
-uci set firewall.ts_to_lan.src='tailscale'
-uci set firewall.ts_to_lan.dest='lan'
-
-# LAN -> Tailscale yönlendirme
-uci -q delete firewall.lan_to_ts 2>/dev/null || true
-uci set firewall.lan_to_ts=forwarding
-uci set firewall.lan_to_ts.src='lan'
-uci set firewall.lan_to_ts.dest='tailscale'
- 
-# Tailscale -> WAN (exit node için)
-if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
-    uci -q delete firewall.ts_to_wan 2>/dev/null || true
-    uci set firewall.ts_to_wan=forwarding
-    uci set firewall.ts_to_wan.src='tailscale'
-    uci set firewall.ts_to_wan.dest='wan'
+if [ ! -f /usr/bin/tailscale ] && [ -f /usr/sbin/tailscale ]; then
+    ln -s /usr/sbin/tailscale /usr/bin/tailscale 2>/dev/null || true
+    echo "    ✅ /usr/bin/tailscale sembolik bağı oluşturuldu."
 fi
 
-# IP yönlendirme (forwarding) - Çekirdek (Kernel) seviyesi yapılandırma
-echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-tailscale.conf
-echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-tailscale.conf
-sysctl -p /etc/sysctl.d/99-tailscale.conf 2>/dev/null || true
-
-uci commit firewall
-/etc/init.d/firewall restart 2>/dev/null || true
-
-echo "    Firewall OK"
-
-# --- 5. NETWORK ARAYÜZÜ ---
-echo "[5/5] Network arayüzü..."
-
-# tailscale0 için interface tanımla
-uci -q delete network.tailscale 2>/dev/null || true
-uci set network.tailscale=interface
-uci set network.tailscale.proto='none'
-uci set network.tailscale.device='tailscale0'
-
-uci commit network
-/etc/init.d/network reload 2>/dev/null || true
-sleep 2
 
 # --- DOĞRULAMA ---
 echo ""
@@ -218,6 +253,19 @@ if [ "$WOL_ENABLED" = "evet" ]; then
 fi
 
 echo ""
+echo "    =================================================================="
+echo "    ⚠️ DİKKAT: ADGUARD HOME KULLANICILARI İÇİN ÖNEMLİ ADIM ⚠️"
+echo "    Eğer sistemde AdGuard Home kurulu ise, Tailscale bağlantısının"
+echo "    bloklanmaması ve stabil çalışması için AdGuard Web Arayüzünde:"
+echo "    Filtrelemeler -> Özel Filtreleme Kuralları alanına"
+echo "    aşağıdaki 3 satırı manuel olarak kopyalayıp yapıştırın ve kaydedin:"
+echo ""
+echo "    @@||tailscale.com^\$important"
+echo "    @@||ts.net^\$important"
+echo "    @@||tailscaled.net^\$important"
+echo "    =================================================================="
+
+echo ""
 echo "================================================================"
 echo "  TAILSCALE KURULUMU TAMAMLANDI"
 echo "================================================================"
@@ -226,12 +274,16 @@ echo "  Tailscale IP: $TS_IP"
 echo "  Subnet: $LAN_SUBNET"
 echo "  Admin: https://login.tailscale.com/admin/machines"
 echo ""
-echo "  ÖNEMLİ: Tailscale admin panelinden şu ayarları yapın:"
-echo "  1. Subnet routes'u ONAYLA (Edit route settings)"
+echo "  ÖNEMLİ: Cihazınızda sorunsuz bağlantı için şu ayarları yapın:"
+echo "  1. Tailscale Admin Panel: Subnet routes'u ONAYLA (Edit route settings)"
 if [ "$ADVERTISE_EXIT_NODE" = "evet" ]; then
-    echo "  2. Exit node'u ONAYLA"
+    echo "  2. Tailscale Admin Panel: Exit node'u ONAYLA"
 fi
+echo "  3. Ağınızın DNS sunucusunu kullanmak için;"
+echo "     Tailscale Admin Panel -> DNS -> Global nameservers -> Add nameserver -> Custom seçin,"
+echo "     $TS_IP adresini girip ekleyin ve 'Override local DNS' seçeneğini işaretleyin."
 echo ""
+
 if [ "$WOL_ENABLED" = "evet" ]; then
     echo "  WoL kullanimi: ssh root@$(tailscale ip -4) \"etherwake -i br-lan MAC_ADRESI\""
 fi
@@ -263,10 +315,12 @@ killall -9 tailscaled 2>/dev/null || true
 
 # Paket kaldırma
 echo "[2/4] Paketler kaldırılıyor... ($PKG_MANAGER)"
-pkg_remove tailscale 2>/dev/null || true
-pkg_remove etherwake 2>/dev/null || true
+pkg_remove tailscale etherwake 2>/dev/null || true
 
-# MagicDNS temizliği
+# Sembolik bağ temizliği
+rm -f /usr/bin/tailscale 2>/dev/null || true
+
+# MagicDNS ve dnsmasq temizliği
 echo "[2.5/4] MagicDNS dnsmasq kayıtları temizleniyor..."
 for entry in $(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null); do
     echo "$entry" | grep -q "ts.net" &&         uci -q del_list dhcp.@dnsmasq[0].server="$entry" 2>/dev/null || true
@@ -282,6 +336,12 @@ uci -q delete firewall.tailscale_zone 2>/dev/null || true
 uci -q delete firewall.ts_to_lan 2>/dev/null || true
 uci -q delete firewall.lan_to_ts 2>/dev/null || true
 uci -q delete firewall.ts_to_wan 2>/dev/null || true
+
+# Trafik Kurallarını Temizleme
+uci -q delete firewall.tailscale_wan_udp 2>/dev/null || true
+uci -q delete firewall.tailscale_in 2>/dev/null || true
+uci -q delete firewall.tailscale_out 2>/dev/null || true
+
 uci commit firewall 2>/dev/null || true
 
 # Network temizliği

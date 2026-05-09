@@ -569,7 +569,8 @@ def run_cli() -> None:
             print("\n  [Bilgi] Otomatik gönderim iptal edildi. Oluşturulan betikleri manuel kullanabilirsiniz.")
 
     if mode == "disk":
-        print("\n  ⚠️ NOT: Disk genişletme router üzerinde 2 kez yeniden başlatma (reboot) gerektirir.")
+        print("\n  ⚠️ NOT: Kalıcı oto-genişletme servisi kuruldu. Sistem arka planda diski genişletip")
+        print("          otomatik olarak yeniden başlatacaktır. Sysupgrade sonrasında da bu işlem otonom gerçekleşir.")
 
 
 if __name__ == "__main__":

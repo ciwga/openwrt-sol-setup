@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Raspberry Pi 5 özel araçlar.
+"""
+Raspberry Pi 5 özel araçlar.
 
 İki bağımsız modül:
   1. Disk Genişletme - SD kart/SSD üzerindeki root bölümünü tam kapasiteye genişletir
@@ -13,15 +14,11 @@ from typing import Final
 
 DISK_EXPAND_TEMPLATE: Final[str] = r"""#!/bin/sh
 # ==============================================================================
-# expand_disk.sh - Disk Genişletme (OpenWrt)
+# expand_disk.sh - Otomatik ve Kalıcı Disk Genişletme (OpenWrt)
 #
 # SD kart veya SSD üzerindeki root bölümünü tam kapasiteye genişletir.
-# Kaynak: https://openwrt.org/docs/guide-user/advanced/expand_root
-#
-# UYARI: İşlem 2 yeniden başlatma gerektirir!
-#   1. reboot: Bölüm (partition) genişletilir  → otomatik reboot
-#   2. reboot: Dosya sistemi (filesystem) genişletilir → otomatik reboot
-#   Her iki adım uci-defaults mekanizmasıyla otomatik çalışır.
+# Attended Sysupgrade sonrasında boyutun küçülmesini engellemek için
+# kalıcı bir oto-genişletme servisi kurar.
 # ==============================================================================
 
 set -e
@@ -30,102 +27,107 @@ set -e
 
 echo ""
 echo "================================================================"
-echo "  Disk Genişletme"
+echo "  Kalıcı Otonom Disk Genişletme Kurulumu"
 echo "================================================================"
 
-# Zaten tamamlanmış mı?
-if [ -e /etc/rootfs-resize ]; then
-    echo ""
-    df -h / | awk 'NR==2{printf "  Zaten genişletilmiş: Toplam %s | Kullanılan %s | Boş %s\n", $2, $3, $4}'
-    echo "================================================================"
+# --- Güncelleme sonrası eski bootloop yapan hatalı betikleri silme ---
+rm -f /etc/uci-defaults/70-rootpt-resize 2>/dev/null || true
+rm -f /etc/uci-defaults/80-rootfs-resize 2>/dev/null || true
+sed -i '/70-rootpt-resize/d' /etc/sysupgrade.conf 2>/dev/null || true
+sed -i '/80-rootfs-resize/d' /etc/sysupgrade.conf 2>/dev/null || true
+
+echo "[1/4] Gerekli disk araçları kuruluyor... ($PKG_MANAGER)"
+pkg_update >/dev/null 2>&1 || true
+for pkg in parted losetup resize2fs blkid; do
+    pkg_install "$pkg" >/dev/null 2>&1 && echo "    $pkg OK" || echo "    $pkg atlandı"
+done
+
+echo "[2/4] Kalıcı oto-genişletme betiği oluşturuluyor..."
+
+cat << 'EOF_EXPAND' > /etc/auto_expand.sh
+#!/bin/sh
+
+[ -f /etc/.disk_expanded ] && exit 0
+
+if ! command -v parted >/dev/null || ! command -v resize2fs >/dev/null; then
+    logger -t disk_expander "Uyarı: parted veya resize2fs bulunamadı, genişletme iptal edildi."
     exit 0
 fi
 
-# Mevcut durum
+# Disk aygıtlarını dinamik ve evrensel olarak belirle (SD, USB, NVMe)
+ROOT_BLK_SYS="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+ROOT_DEV="/dev/$(basename "$ROOT_BLK_SYS")"
+ROOT_DISK="/dev/$(basename "$(dirname "$ROOT_BLK_SYS")")"
+ROOT_PART="${ROOT_DEV##*[^0-9]}"
+
+if [ ! -f /etc/.disk_part_done ]; then
+    logger -t disk_expander "Adım 1: Disk bölümü %100 kapasiteye genişletiliyor..."
+    parted -f -s "${ROOT_DISK}" resizepart "${ROOT_PART}" 100%
+
+    if [ -e /boot/cmdline.txt ]; then
+        # UUID hesabını ROOT_DEV üzerinden al
+        NEW_UUID=$(blkid -s PARTUUID -o value "${ROOT_DEV}")
+        if [ -n "$NEW_UUID" ]; then
+            sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
+        fi
+    fi
+
+    touch /etc/.disk_part_done
+    sync
+    reboot
+    exit 0
+fi
+
+if [ ! -f /etc/.disk_fs_done ]; then
+    logger -t disk_expander "Adım 2: Dosya sistemi (RootFS) sınırları genişletiliyor..."
+
+    # Kernel Panic koruması
+    if df -T / | grep -q -i ext4; then
+        resize2fs -f "${ROOT_DEV}"
+    else
+        # Sadece SquashFS varsa loop device devreye sokulur
+        LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' /proc/self/mountinfo)"
+        if [ -z "${LOOP_DEV}" ] && command -v losetup >/dev/null; then
+            LOOP_DEV="$(losetup -f)"
+            losetup "${LOOP_DEV}" "${ROOT_DEV}"
+        fi
+        if [ -n "${LOOP_DEV}" ]; then
+            resize2fs -f "${LOOP_DEV}"
+        fi
+    fi
+
+    touch /etc/.disk_fs_done
+    touch /etc/.disk_expanded
+    logger -t disk_expander "Disk genişletme başarıyla tamamlandı!"
+    sync
+    reboot
+    exit 0
+fi
+EOF_EXPAND
+
+chmod +x /etc/auto_expand.sh
+
+echo "[3/4] /etc/rc.local açılış tetikleyicisi ayarlanıyor..."
+if ! grep -q "auto_expand.sh" /etc/rc.local 2>/dev/null; then
+    sed -i '/^exit 0/i \/etc\/auto_expand.sh &' /etc/rc.local
+fi
+
+echo "[4/4] Sysupgrade (Güncelleme) korumasına ekleniyor..."
+if ! grep -q "/etc/auto_expand.sh" /etc/sysupgrade.conf 2>/dev/null; then
+    echo "/etc/auto_expand.sh" >> /etc/sysupgrade.conf
+fi
+
 echo ""
-df -h / | awk 'NR==2{printf "  Mevcut: Toplam %s | Kullanılan %s | Boş %s\n", $2, $3, $4}'
+echo "================================================================"
+echo "  KURULUM TAMAMLANDI!"
+echo "  Sistem şimdi diskinizi genişletmek için otonom süreci başlatıyor."
 echo ""
-
-# --- 1. PAKETLER ---
-echo "[1/3] Paketler kuruluyor... ($PKG_MANAGER)"
-pkg_update >/dev/null 2>&1 || { echo "HATA: $PKG_MANAGER update başarısız!"; exit 1; }
-for pkg in parted losetup resize2fs blkid; do
-    pkg_install "$pkg" >/dev/null 2>&1 && echo "    $pkg OK" || echo "    $pkg atlandı (zaten mevcut olabilir)"
-done
-
-# --- 2. STARTUP BETİKLERİ ---
-echo "[2/3] Startup betikleri yazılıyor..."
-
-cat << "PTEOF" > /etc/uci-defaults/70-rootpt-resize
-if [ ! -e /etc/rootpt-resize ] \
-&& type parted > /dev/null \
-&& lock -n /var/lock/root-resize
-then
-ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
-'$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
-ROOT_DISK="/dev/$(basename "${ROOT_BLK%/*}")"
-ROOT_PART="${ROOT_BLK##*[^0-9]}"
-parted -f -s "${ROOT_DISK}" \
-resizepart "${ROOT_PART}" 100%
-mount_root done
-touch /etc/rootpt-resize
-
-if [ -e /boot/cmdline.txt ]
-then
-NEW_UUID=`blkid ${ROOT_DISK}p${ROOT_PART} | sed -n 's/.*PARTUUID="\([^"]*\)".*/\1/p'`
-sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
-fi
-
-reboot
-fi
-exit 1
-PTEOF
-
-cat << "FSEOF" > /etc/uci-defaults/80-rootfs-resize
-if [ ! -e /etc/rootfs-resize ] \
-&& [ -e /etc/rootpt-resize ] \
-&& type losetup > /dev/null \
-&& type resize2fs > /dev/null \
-&& lock -n /var/lock/root-resize
-then
-ROOT_BLK="$(readlink -f /sys/dev/block/"$(awk -e \
-'$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
-ROOT_DEV="/dev/${ROOT_BLK##*/}"
-LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' \
-/proc/self/mountinfo)"
-if [ -z "${LOOP_DEV}" ]
-then
-LOOP_DEV="$(losetup -f)"
-losetup "${LOOP_DEV}" "${ROOT_DEV}"
-fi
-resize2fs -f "${LOOP_DEV}"
-mount_root done
-touch /etc/rootfs-resize
-reboot
-fi
-exit 1
-FSEOF
-
-# sysupgrade sonrasında betikler korunsun
-grep -q "70-rootpt-resize" /etc/sysupgrade.conf 2>/dev/null || \
-cat << "SUEOF" >> /etc/sysupgrade.conf
-/etc/uci-defaults/70-rootpt-resize
-/etc/uci-defaults/80-rootfs-resize
-SUEOF
-
-echo "    70-rootpt-resize → OK"
-echo "    80-rootfs-resize → OK"
-echo "    sysupgrade.conf  → OK"
-
-# --- 3. BAŞLAT ---
-echo "[3/3] Bölüm genişletiliyor ve yeniden başlatılıyor..."
-echo ""
-echo "  Sistem şimdi yeniden başlayacak (1. reboot: bölüm genişletme)."
-echo "  Ardından otomatik olarak tekrar başlayacak (2. reboot: dosya sistemi)."
-echo "  Tamamlandıktan sonra 'df -h /' ile kontrol edin."
+echo "  ÖNEMLİ BİLGİ: Bundan sonra 'Attended Sysupgrade' ile"
+echo "  güncelleme yaptığınızda, cihaz açılışta boyutun küçüldüğünü"
+echo "  kendi kendine fark edecek ve OTONOM olarak arka planda genişletecektir."
 echo "================================================================"
 
-sh /etc/uci-defaults/70-rootpt-resize
+/etc/auto_expand.sh &
 """
 
 ARGON_FAN_TEMPLATE: Final[str] = r"""#!/bin/sh
@@ -231,8 +233,8 @@ lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || df -h
 # Genişletme durumu
 echo ""
 echo "  Genişletme Durumu:"
-[ -e /etc/rootpt-resize ] && echo "    Bölüm:       GENİŞLETİLDİ" || echo "    Bölüm:       GENİŞLETİLMEDİ"
-[ -e /etc/rootfs-resize ] && echo "    Dosya sistemi: GENİŞLETİLDİ" || echo "    Dosya sistemi: GENİŞLETİLMEDİ"
+[ -e /etc/.disk_part_done ] && echo "    Bölüm:       GENİŞLETİLDİ" || echo "    Bölüm:       GENİŞLETİLMEDİ"
+[ -e /etc/.disk_fs_done ] && echo "    Dosya sistemi: GENİŞLETİLDİ" || echo "    Dosya sistemi: GENİŞLETİLMEDİ"
 
 echo ""
 echo "================================================================"

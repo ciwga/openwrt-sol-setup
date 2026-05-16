@@ -36,23 +36,23 @@ echo "  AdGuard(:53) -> DoH(:$HDNSP_PORT) | dnsmasq(:$AGH_DNS_PORT DHCP)"
 echo "================================================================"
 
 # --- 1. YEDEK ---
-echo "[1/7] Yedekleme..."
+echo "[1/8] Yedekleme..."
 BACKUP_DIR="/root/dns-backup-$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$BACKUP_DIR"
-for f in /etc/config/dhcp /etc/config/firewall /etc/config/https-dns-proxy; do
+for f in /etc/config/dhcp /etc/config/firewall /etc/config/https-dns-proxy /etc/adguardhome/config.yaml; do
     [ -f "$f" ] && cp -a "$f" "$BACKUP_DIR/"
 done
 echo "    Yedek: $BACKUP_DIR"
 
 # --- 2. PAKETLER ---
-echo "[2/7] Paketler... ($PKG_MANAGER)"
+echo "[2/8] Paketler... ($PKG_MANAGER)"
 pkg_update >/dev/null 2>&1 || true
 for pkg in curl wget-ssl ca-bundle ca-certificates https-dns-proxy luci-app-https-dns-proxy; do
     pkg_install "$pkg" >/dev/null 2>&1 && echo "    $pkg OK" || echo "    $pkg atlandı"
 done
 
 # --- 3. HTTPS-DNS-PROXY ---
-echo "[3/7] HTTPS-DNS-Proxy..."
+echo "[3/8] HTTPS-DNS-Proxy..."
 
 while uci -q delete https-dns-proxy.@https-dns-proxy[0] 2>/dev/null; do :; done
 
@@ -118,7 +118,7 @@ fi
 echo "    DoH OK, force_dns=0"
 
 # --- 4. ADGUARD HOME - PORT 53 ---
-echo "[4/7] AdGuard Home (port 53 - istemci görünürlüğü)..."
+echo "[4/8] AdGuard Home (port 53 - istemci görünürlüğü)..."
 
 AGH_CONF_DIR="/etc/adguardhome"
 AGH_CONF="$AGH_CONF_DIR/config.yaml"
@@ -239,7 +239,7 @@ echo "    AGH: DNS=:53 (per-client!) | Web=http://$LAN_IP:$AGH_WEB_PORT"
 echo "    Split-DNS: *.superonline.net -> $ISP_DNS1 (AdGuard içinde)"
 
 # --- 5. DNSMASQ (port 5353, DHCP-only) ---
-echo "[5/7] dnsmasq -> port $AGH_DNS_PORT (DHCP servisi)..."
+echo "[5/8] dnsmasq -> port $AGH_DNS_PORT (DHCP servisi)..."
 
 # dnsmasq port 53'ü AdGuard'a bırakır
 uci set dhcp.@dnsmasq[0].port="$AGH_DNS_PORT"
@@ -260,7 +260,7 @@ uci add_list dhcp.lan.dhcp_option="6,$LAN_IP"
 echo "    dnsmasq: port $AGH_DNS_PORT (DHCP-only)"
 
 # --- 6. TV+ DHCP BYPASS ---
-echo "[6/7] TV+ DNS bypass..."
+echo "[6/8] TV+ DNS bypass..."
 
 TVPLUS_STB_MAC="<<TVPLUS_STB_MAC>>"
 TVPLUS_STB_IP="<<TVPLUS_STB_IP>>"
@@ -294,7 +294,7 @@ fi
 uci commit dhcp
 
 # --- 7. SERVİSLER ---
-echo "[7/7] Servisler başlatılıyor..."
+echo "[7/8] Servisler başlatılıyor..."
 
 # 1) DoH proxy
 /etc/init.d/https-dns-proxy restart 2>/dev/null || true
@@ -321,6 +321,15 @@ for HANDLE in $(nft -a list chain inet fw4 dstnat 2>/dev/null | grep "dport 53.*
 done
 for HANDLE in $(nft -a list chain inet fw4 dstnat 2>/dev/null | grep "dport 853" | awk '{print $NF}'); do
     nft delete rule inet fw4 dstnat handle "$HANDLE" 2>/dev/null || true
+done
+
+# --- 8. SYSUPGRADE KORUMASI ---
+echo "[8/8] Sysupgrade (Güncelleme) korumasına ekleniyor..."
+for path in "/etc/adguardhome" "/etc/dnsmasq.d" "/etc/config/adguardhome" "/etc/config/https-dns-proxy"; do
+    if ! grep -q "^${path}$" /etc/sysupgrade.conf 2>/dev/null; then
+        echo "$path" >> /etc/sysupgrade.conf
+        echo "    + $path korumaya alındı."
+    fi
 done
 
 # DOĞRULAMA
@@ -354,7 +363,7 @@ R=$(nslookup google.com 127.0.0.1 2>&1 | grep -i "address" | tail -1)
 
 echo ""
 echo "================================================================"
-echo "  DNS ZİNCİRİ TAMAMLANDI (v3)"
+echo "  DNS ZİNCİRİ TAMAMLANDI - SYSUPGRADE KORUMALI"
 echo "  AdGuard(:53) -> DoH(:$HDNSP_PORT) | dnsmasq(:$AGH_DNS_PORT DHCP-only)"
 echo "  Split-DNS: *.superonline.net -> ISP DNS (AdGuard upstream)"
 echo "  Per-client: AdGuard panelinde her cihaz görünür!"
@@ -367,7 +376,7 @@ echo "================================================================"
 
 DNS_CHAIN_UNINSTALL_TEMPLATE: Final[str] = r"""#!/bin/sh
 # ==============================================================================
-# uninstall_dns_chain.sh (v3) - KOMPLE TEMİZLİK
+# uninstall_dns_chain.sh
 # AdGuard Home + HTTPS-DNS-Proxy + dnsmasq ayarları + lease + konfigürasyonlar
 # ==============================================================================
 
@@ -380,7 +389,7 @@ echo "  DNS Zinciri - Komple Kaldırma"
 echo "================================================================"
 
 # --- 1. ADGUARD HOME ---
-echo "[1/6] AdGuard Home tamamen kaldırılıyor..."
+echo "[1/7] AdGuard Home tamamen kaldırılıyor..."
 /etc/init.d/adguardhome stop 2>/dev/null || true
 killall -9 AdGuardHome adguardhome 2>/dev/null || true
 /etc/init.d/adguardhome disable 2>/dev/null || true
@@ -400,7 +409,7 @@ rm -f /etc/init.d/adguardhome 2>/dev/null || true
 echo "    AdGuard Home tamamen silindi."
 
 # --- 2. HTTPS-DNS-PROXY ---
-echo "[2/6] HTTPS-DNS-Proxy tamamen kaldırılıyor..."
+echo "[2/7] HTTPS-DNS-Proxy tamamen kaldırılıyor..."
 /etc/init.d/https-dns-proxy stop 2>/dev/null || true
 killall -9 https-dns-proxy 2>/dev/null || true
 /etc/init.d/https-dns-proxy disable 2>/dev/null || true
@@ -425,7 +434,7 @@ rm -f /etc/config/https-dns-proxy 2>/dev/null || true
 echo "    HTTPS-DNS-Proxy tamamen silindi."
 
 # --- 3. DNSMASQ VARSAYILANA DÖNDÜR ---
-echo "[3/6] dnsmasq varsayılanına döndürülüyor..."
+echo "[3/7] dnsmasq varsayılanına döndürülüyor..."
 
 # Port (varsayılan 53'e dön)
 uci -q delete dhcp.@dnsmasq[0].port 2>/dev/null || true
@@ -456,7 +465,7 @@ uci -q delete dhcp.@dnsmasq[0].confdir 2>/dev/null || true
 echo "    dnsmasq varsayılanına döndü."
 
 # --- 4. TV+ DHCP / STATIC LEASE TEMİZLİĞİ ---
-echo "[4/6] TV+ DHCP lease ve static host temizliği..."
+echo "[4/7] TV+ DHCP lease ve static host temizliği..."
 
 # UCI named host temizle
 uci -q delete dhcp.tvplus_stb 2>/dev/null || true
@@ -497,8 +506,14 @@ uci commit dhcp
 
 echo "    TV+ DHCP kalıntıları tamamen temizlendi."
 
-# --- 5. FIREWALL TEMİZLİĞİ ---
-echo "[5/6] Firewall redirect ve eski kurallar temizleniyor..."
+# --- 5. SYSUPGRADE KORUMASI TEMİZLİĞİ ---
+echo "[5/7] Sysupgrade korumaları kaldırılıyor..."
+sed -i '\#^/etc/adguardhome$#d' /etc/sysupgrade.conf 2>/dev/null || true
+sed -i '\#^/etc/dnsmasq.d$#d' /etc/sysupgrade.conf 2>/dev/null || true
+echo "    Korumalar temizlendi."
+
+# --- 6. FIREWALL TEMİZLİĞİ ---
+echo "[6/7] Firewall redirect ve eski kurallar temizleniyor..."
 
 # https-dns-proxy'nin bıraktığı redirect kurallarını temizle
 /etc/init.d/firewall restart 2>/dev/null || true
@@ -515,8 +530,8 @@ fi
 
 echo "    Firewall temiz."
 
-# --- 6. SERVİSLERİ YENİDEN BAŞLAT ---
-echo "[6/6] Servisler yeniden başlatılıyor..."
+# --- 7. SERVİSLERİ YENİDEN BAŞLAT ---
+echo "[7/7] Servisler yeniden başlatılıyor..."
 killall -9 dnsmasq 2>/dev/null || true
 sleep 1
 /etc/init.d/dnsmasq restart 2>/dev/null || true
@@ -530,6 +545,7 @@ echo "  - HTTPS-DNS-Proxy: silindi (paket + konfig + redirect)"
 echo "  - dnsmasq: varsayılan (port 53, WAN DNS)"
 echo "  - TV+ static lease: temizlendi"
 echo "  - DHCP leases: temizlendi"
+echo "  - Sysupgrade koruması: temizlendi"
 echo "  - Firewall redirect: temizlendi"
 echo ""
 echo "  *** TV+ KUTUSUNU YENİDEN BAŞLATIN! ***"

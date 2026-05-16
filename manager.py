@@ -28,10 +28,14 @@ REGEX_PORT: Final[re.Pattern] = re.compile(r"^\d+$")
 # Zapret modülü için varsayılan alan adları
 DEFAULT_ZAPRET_DOMAINS: Final[List[str]] = [
     "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com",
-    "ggpht.com", "gstatic.com", "googleapis.com",
+    "ggpht.com", "gstatic.com", "googleapis.com", "googleusercontent.com",
     "discord.com", "discord.gg", "discordapp.com", "xcancel.com",
-    "protonvpn.com", "pastebin.com", "4shared.com", "wikileaks.org",
-    "pages.dev", "cloudflare.com"
+    "protonvpn.com", ".proton.me", "proton.me", "protonweb.com", ".mullvad.net", 
+    "mullvad.net", "pastebin.com", "4shared.com", "wikileaks.org", "pages.dev", 
+    "google.com", "cloudflare.com", "x.com", "twitter.com", 
+    "twimg.com", "t.co", "kick.com", "ttvnw.net", "twitch.tv", 
+    "torproject.org", "cloudflare-dns.com", "dns.google", "one.one.one.one",
+    "dns.quad9.net", "adguard-dns.io"
 ]
 
 # Boş bırakılabilir alanların listesi

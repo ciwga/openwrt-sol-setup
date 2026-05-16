@@ -36,9 +36,12 @@ rm -f /etc/uci-defaults/80-rootfs-resize 2>/dev/null || true
 sed -i '/70-rootpt-resize/d' /etc/sysupgrade.conf 2>/dev/null || true
 sed -i '/80-rootfs-resize/d' /etc/sysupgrade.conf 2>/dev/null || true
 
+# Önceki denemelerden kalan başarı bayraklarını temizle
+rm -f /etc/.disk_* 2>/dev/null || true
+
 echo "[1/4] Gerekli disk araçları kuruluyor... ($PKG_MANAGER)"
 pkg_update >/dev/null 2>&1 || true
-for pkg in parted losetup resize2fs blkid; do
+for pkg in parted losetup resize2fs blkid e2fsprogs; do
     pkg_install "$pkg" >/dev/null 2>&1 && echo "    $pkg OK" || echo "    $pkg atlandı"
 done
 
@@ -47,25 +50,55 @@ echo "[2/4] Kalıcı oto-genişletme betiği oluşturuluyor..."
 cat << 'EOF_EXPAND' > /etc/auto_expand.sh
 #!/bin/sh
 
-[ -f /etc/.disk_expanded ] && exit 0
-
-if ! command -v parted >/dev/null || ! command -v resize2fs >/dev/null; then
-    logger -t disk_expander "Uyarı: parted veya resize2fs bulunamadı, genişletme iptal edildi."
-    exit 0
+# ==============================================================================
+# SYSUPGRADE TESPİTİ VE ONARIMI
+# ==============================================================================
+ROOT_BLK_SYS="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo 2>/dev/null)" 2>/dev/null)"
+if [ -n "$ROOT_BLK_SYS" ]; then
+    PART_NAME="$(basename "$ROOT_BLK_SYS")"
+    if [ -f "/sys/class/block/$PART_NAME/size" ]; then
+        PART_SECTORS=$(cat "/sys/class/block/$PART_NAME/size" 2>/dev/null || echo "0")
+        if [ "$PART_SECTORS" -gt 0 ] && [ "$PART_SECTORS" -lt 1000000 ]; then
+            rm -f /etc/.disk_expanded
+            rm -f /etc/.disk_part_done
+            rm -f /etc/.disk_fs_done
+        fi
+    fi
 fi
 
-# Disk aygıtlarını dinamik ve evrensel olarak belirle (SD, USB, NVMe)
-ROOT_BLK_SYS="$(readlink -f /sys/dev/block/"$(awk -e '$9=="/dev/root"{print $3}' /proc/self/mountinfo)")"
+[ -f /etc/.disk_expanded ] && exit 0
+
+# Sysupgrade sonrası silinen paketleri internet gelince geri kur
+if ! command -v parted >/dev/null || ! command -v resize2fs >/dev/null || ! command -v losetup >/dev/null; then
+    logger -t disk_expander "Sysupgrade durumu tespit edildi. Paketler icin internet bekleniyor..."
+    for i in $(seq 1 36); do
+        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+            logger -t disk_expander "Internet mevcut. Eksik paketler kuruluyor..."
+            if command -v apk >/dev/null; then
+                apk update && apk add parted losetup e2fsprogs blkid || true
+            else
+                opkg update && opkg install parted losetup resize2fs blkid || true
+            fi
+            break
+        fi
+        sleep 5
+    done
+    if ! command -v parted >/dev/null || ! command -v resize2fs >/dev/null; then
+        logger -t disk_expander "HATA: Paketler kurulamadi."
+        exit 0
+    fi
+fi
+
 ROOT_DEV="/dev/$(basename "$ROOT_BLK_SYS")"
 ROOT_DISK="/dev/$(basename "$(dirname "$ROOT_BLK_SYS")")"
 ROOT_PART="${ROOT_DEV##*[^0-9]}"
 
+# Adım 1: Partition Genişletme
 if [ ! -f /etc/.disk_part_done ]; then
     logger -t disk_expander "Adım 1: Disk bölümü %100 kapasiteye genişletiliyor..."
     parted -f -s "${ROOT_DISK}" resizepart "${ROOT_PART}" 100%
 
     if [ -e /boot/cmdline.txt ]; then
-        # UUID hesabını ROOT_DEV üzerinden al
         NEW_UUID=$(blkid -s PARTUUID -o value "${ROOT_DEV}")
         if [ -n "$NEW_UUID" ]; then
             sed -i "s/PARTUUID=[^ ]*/PARTUUID=${NEW_UUID}/" /boot/cmdline.txt
@@ -78,22 +111,21 @@ if [ ! -f /etc/.disk_part_done ]; then
     exit 0
 fi
 
+# Adım 2: Dosya Sistemi Genişletme (Loopback Trick)
 if [ ! -f /etc/.disk_fs_done ]; then
     logger -t disk_expander "Adım 2: Dosya sistemi (RootFS) sınırları genişletiliyor..."
 
-    # Kernel Panic koruması
-    if df -T / | grep -q -i ext4; then
-        resize2fs -f "${ROOT_DEV}"
+    LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' /proc/self/mountinfo 2>/dev/null)"
+    if [ -z "${LOOP_DEV}" ]; then
+        LOOP_DEV="$(losetup -f 2>/dev/null)"
+        losetup "${LOOP_DEV}" "${ROOT_DEV}" 2>/dev/null || true
+    fi
+    
+    if [ -n "${LOOP_DEV}" ]; then
+        resize2fs -f "${LOOP_DEV}"
     else
-        # Sadece SquashFS varsa loop device devreye sokulur
-        LOOP_DEV="$(awk -e '$5=="/overlay"{print $9}' /proc/self/mountinfo)"
-        if [ -z "${LOOP_DEV}" ] && command -v losetup >/dev/null; then
-            LOOP_DEV="$(losetup -f)"
-            losetup "${LOOP_DEV}" "${ROOT_DEV}"
-        fi
-        if [ -n "${LOOP_DEV}" ]; then
-            resize2fs -f "${LOOP_DEV}"
-        fi
+        # Loopback oluşturulamazsa fallback
+        resize2fs -f "${ROOT_DEV}" || true
     fi
 
     touch /etc/.disk_fs_done
@@ -103,6 +135,8 @@ if [ ! -f /etc/.disk_fs_done ]; then
     reboot
     exit 0
 fi
+
+exit 0
 EOF_EXPAND
 
 chmod +x /etc/auto_expand.sh
@@ -121,10 +155,6 @@ echo ""
 echo "================================================================"
 echo "  KURULUM TAMAMLANDI!"
 echo "  Sistem şimdi diskinizi genişletmek için otonom süreci başlatıyor."
-echo ""
-echo "  ÖNEMLİ BİLGİ: Bundan sonra 'Attended Sysupgrade' ile"
-echo "  güncelleme yaptığınızda, cihaz açılışta boyutun küçüldüğünü"
-echo "  kendi kendine fark edecek ve OTONOM olarak arka planda genişletecektir."
 echo "================================================================"
 
 /etc/auto_expand.sh &
@@ -232,9 +262,35 @@ lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || df -h
 
 # Genişletme durumu
 echo ""
-echo "  Genişletme Durumu:"
-[ -e /etc/.disk_part_done ] && echo "    Bölüm:       GENİŞLETİLDİ" || echo "    Bölüm:       GENİŞLETİLMEDİ"
-[ -e /etc/.disk_fs_done ] && echo "    Dosya sistemi: GENİŞLETİLDİ" || echo "    Dosya sistemi: GENİŞLETİLMEDİ"
+echo "  Genişletme Durumu (Gerçek Donanım):"
+ROOT_DEV=""
+BOOT_DEV=$(df /boot 2>/dev/null | awk 'NR==2 {print $1}')
+if [ -n "$BOOT_DEV" ]; then
+    ROOT_DISK=$(echo "$BOOT_DEV" | sed -E 's/p?1$//')
+    if [ -b "${ROOT_DISK}p2" ]; then ROOT_DEV="${ROOT_DISK}p2"
+    elif [ -b "${ROOT_DISK}2" ]; then ROOT_DEV="${ROOT_DISK}2"
+    fi
+fi
+
+if [ -n "$ROOT_DEV" ]; then
+    PART_SIZE=$(cat "/sys/class/block/$(basename "$ROOT_DEV")/size" 2>/dev/null || echo 0)
+    PART_GB=$((PART_SIZE * 512 / 1000000000))
+    if [ "$PART_GB" -gt 2 ]; then
+        echo "    Bölüm (Donanım): GENİŞLETİLDİ (~${PART_GB} GB)"
+    else
+        echo "    Bölüm (Donanım): GENİŞLETİLMEDİ (~${PART_GB} GB)"
+    fi
+    
+    FS_KB=$(df -k / | awk 'NR==2 {print $2}' 2>/dev/null || echo 0)
+    FS_GB=$((FS_KB / 1000000))
+    if [ "$FS_GB" -gt 2 ]; then
+        echo "    Dosya sistemi:   GENİŞLETİLDİ (~${FS_GB} GB)"
+    else
+        echo "    Dosya sistemi:   GENİŞLETİLMEDİ (~${FS_GB} GB)"
+    fi
+else
+    echo "    Durum: Bilinmiyor"
+fi
 
 echo ""
 echo "================================================================"

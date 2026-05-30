@@ -1,0 +1,68 @@
+# ==============================================================================
+# ZAPRET DPI BYPASS - ALAN ADLARI LİSTESİ
+# ==============================================================================
+
+# --- GOOGLE SERVİSLERİ ---
+youtube.com
+youtu.be
+googlevideo.com
+ytimg.com
+ggpht.com
+gstatic.com
+googleapis.com
+googleusercontent.com
+google.com
+
+# --- SOSYAL MEDYA ---
+x.com
+twitter.com
+twimg.com
+t.co
+discord.com
+discord.gg
+discordapp.com
+whatsapp.net
+whatsapp.com
+wa.me
+
+# --- VPN ---
+protonvpn.com
+proton.me
+.proton.me
+protonweb.com
+mullvad.net
+.mullvad.net
+torproject.org
+
+# --- BULUT & CDN SERVİSLERİ ---
+cloudflare.com
+cloudflare-dns.com
+pages.dev
+one.one.one.one
+
+# --- ARAÇLAR ---
+pastebin.com
+wikileaks.org
+4shared.com
+
+# --- DNS PROXİLERİ ---
+dns.google
+dns.quad9.net
+adguard-dns.io
+
+# --- CANLI YAYIN ---
+kick.com
+twitch.tv
+ttvnw.net
+
+# --- OYUN SERVİSLERİ ---
+steam-api.com
+steam-chat.com
+steamcommunity.com
+steamcontent.com
+akamaihd.net
+steamdeck.com
+steamgames.com
+steamstatic.com
+steamusercontent.com
+steam.tv

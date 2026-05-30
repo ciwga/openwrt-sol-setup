@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Shell script uyumluluk sabitleri.
+"""Shell script uyumluluk sabitleri ve donanımsal onarım servisleri.
 
 OpenWrt 25.12 ile birlikte paket yöneticisi opkg'den apk'ya geçti.
 Üretilen shell scriptleri bağımsız (tek dosya) çalışmak zorunda olduğundan
@@ -16,128 +16,117 @@ Kullanım (template dosyalarında):
 
     Ya da manager.py'de toplu replace yapılıyorsa placeholder yeterli:
     # Script içinde: <<PKG_MANAGER_BLOCK>>
+
+Özellikler:
+    USB_FIX_SERVICE (Final[str]): USB Ethernet denetleyicileri için donanımsal güç sıfırlama init betiği.
+    OPENWRT_GUARD (Final[str]): Betiklerin yerel Linux platformlarında yanlışlıkla çalıştırılmasını önleyen koruma katmanı.
+    PKG_MANAGER_BLOCK (Final[str]): OpenWrt sürümleri arasında paket yöneticisi (opkg/apk) soyutlama katmanı.
+    USB_FIX_SETUP_TEMPLATE (Final[str]): USB Fix kurulumunu gerçekleştiren bağımsız kabuk betiği şablonu.
+    USB_FIX_UNINSTALL_TEMPLATE (Final[str]): USB Fix bileşenlerini ve Raspberry Pi yamalarını temizleyen kabuk betiği şablonu.
 """
 
 from typing import Final
 
 # ==============================================================================
-# USB ETHERnet (Realtek r8152 ailesi) BOOT FIX SERVİSİ
+# USB ETHERNET (Realtek r8152 ailesi) BOOT FIX SERVİSİ
 # ==============================================================================
-#
-# Sorun:
-#   Realtek RTL8152/8153/8156/8156B/8157 yongalı USB Ethernet adaptörler
-#   OpenWrt'te yeniden başlatma sonrasında "uykuya dalabilir": arayüz kernel'e
-#   kayıtlıdır ama paket gönderip alamaz duruma gelir.
-#
-# Çözüm:
-#   init.d servisi boot tamamlandıktan sonra (START=99) Realtek r8152 ailesine
-#   ait tüm arayüzleri iki yöntemle tespit eder:
-#     1. sysfs driver adı kalıbı: r815*  (r8152, r8153, r8156 vb.)
-#     2. USB Vendor ID: 0x0bda (Realtek) — driver symlink görünmese de yakalar
-#   Eşleşen her arayüze down → kısa bekleme → up döngüsü uygular.
-#
-# Kapsanan çipler:
-#   RTL8152B, RTL8153, RTL8153A, RTL8153B, RTL8156, RTL8156B, RTL8157
-#   (Hepsi Linux'ta r8152.ko modülünü kullanır.)
-#
-# Çoklu adaptör güvenliği:
-#   Adaptörler arasında 2 saniyelik bekleme USB veri yolu (bus) çakışmasını
-#   önler.
-#
 USB_FIX_SERVICE: Final[str] = """\
 #!/bin/sh /etc/rc.common
 # =============================================================================
-# usb-lan-fix — Realtek USB Ethernet otomatik arayüz uyandırıcı
+# usb-lan-fix — Anakart USB Güç Kesintisi
 # Otomatik üretildi: OpenWrt Ağ Yöneticisi
-#
-# Kapsanan çipler (tümü r8152 kernel modülünü kullanır):
-#   RTL8152B, RTL8153, RTL8153A/B, RTL8156, RTL8156B, RTL8157
-#
-# Tespit yöntemi (çift katmanlı, hangisi tutarsa):
-#   1. sysfs driver adı: r815* kalıbı (r8152, r8153, r8156 vb.)
-#   2. USB Vendor ID : 0x0bda (Realtek) — driver adı görünmese bile yakalar
-#
-# Sabit arayüz adı gerektirmez; kaç adaptör takılırsa otomatik bulur.
 # =============================================================================
-START=99
+START=19
 STOP=10
 
-# Verilen arayüzün Realtek r8152 ailesinden olup olmadığını kontrol eder.
-# Çıkış kodu 0 = eşleşme var, 1 = eşleşme yok.
-_is_r8152_family() {
-    local iface="$1"
-    local drv_link="/sys/class/net/$iface/device/driver"
-
-    # Yöntem 1 — sysfs driver symlink adı: r815* kalıbı
-    # RTL8152→r8152, RTL8153→r8152 ya da r8153, RTL8156B→r8152
-    if [ -L "$drv_link" ]; then
-        drv=$(readlink "$drv_link" 2>/dev/null | sed 's|.*/||')
-        case "$drv" in
-            r815*)
-                return 0
-                ;;
-        esac
-    fi
-
-    # Yöntem 2 — USB Vendor ID: 0x0bda = Realtek Semiconductor Corp.
-    # Driver symlink oluşmadan önce ya da farklı kernel patchlerinde güvenilir.
-    local vendor_file="/sys/class/net/$iface/device/../idVendor"
-    if [ -f "$vendor_file" ]; then
-        vendor=$(cat "$vendor_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-        [ "$vendor" = "0bda" ] && return 0
-    fi
-
-    return 1
-}
-
 start() {
-    logger -t usb-lan-fix "Realtek r8152 ailesi USB adaptörler taranıyor..."
-    FOUND=0
-    for iface in $(ls /sys/class/net/ 2>/dev/null); do
-        if _is_r8152_family "$iface"; then
-            FOUND=$((FOUND + 1))
-            # Birden fazla adaptörde USB veri yolu çakışmasını önlemek için
-            # ilk adaptörden sonra kısa bekleme uygula
-            [ $FOUND -gt 1 ] && sleep 2
-            drv=$(readlink "/sys/class/net/$iface/device/driver" 2>/dev/null | sed 's|.*/||')
-            logger -t usb-lan-fix "  [$FOUND] $iface (drv=${drv:-bilinmiyor}) down/up döngüsü..."
-            ip link set dev "$iface" down 2>/dev/null || true
-            sleep 1
-            ip link set dev "$iface" up   2>/dev/null || true
-            logger -t usb-lan-fix "  [$FOUND] $iface aktif."
-        fi
-    done
-    if [ "$FOUND" -eq 0 ]; then
-        logger -t usb-lan-fix "r8152 ailesi adaptör bulunamadı — atlandı."
+    logger -t usb-lan-fix " [+] xHCI Donanım Reset başlatıldı."
+
+    CAN_RESET=0
+    ROOT_FS=$(mount | awk '$3 == "/" {print $1}')
+    case "$ROOT_FS" in
+        *mmcblk*|*nvme*|*mtdblock*|*ubifs*) 
+            CAN_RESET=1 
+            ;;
+        /dev/root)
+            if grep -q -e "root=PARTUUID" -e "root=/dev/mmc" -e "root=/dev/nvme" /proc/cmdline; then
+                CAN_RESET=1
+            fi
+            ;;
+    esac
+
+    if [ "$CAN_RESET" -eq 1 ]; then
+        logger -t usb-lan-fix " [+] RootFS SD/NVMe üzerinde. Anakart USB gücü kesiliyor..."
+
+        PLATFORM_DEVS=""
+        PCI_DEVS=""
+
+        for hcd in /sys/bus/platform/drivers/xhci-hcd/*; do
+            if [ -d "$hcd" ]; then
+                dev_id=$(basename "$hcd")
+                if [ "$dev_id" != "module" ] && [ "$dev_id" != "bind" ] && [ "$dev_id" != "unbind" ]; then
+                    PLATFORM_DEVS="$PLATFORM_DEVS $dev_id"
+                fi
+            fi
+        done
+
+        for hcd in /sys/bus/pci/drivers/xhci_hcd/0000:*; do
+            if [ -d "$hcd" ]; then
+                dev_id=$(basename "$hcd")
+                PCI_DEVS="$PCI_DEVS $dev_id"
+            fi
+        done
+
+        for dev_id in $PLATFORM_DEVS; do
+            logger -t usb-lan-fix " [+] Platform xHCI Koparılıyor: $dev_id"
+            echo "$dev_id" > /sys/bus/platform/drivers/xhci-hcd/unbind 2>/dev/null || true
+        done
+        for dev_id in $PCI_DEVS; do
+            logger -t usb-lan-fix " [+] PCI xHCI Koparılıyor: $dev_id"
+            echo "$dev_id" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null || true
+        done
+
+        sleep 2
+
+        for dev_id in $PLATFORM_DEVS; do
+            logger -t usb-lan-fix " [+] Platform xHCI Bağlanıyor: $dev_id"
+            echo "$dev_id" > /sys/bus/platform/drivers/xhci-hcd/bind 2>/dev/null || true
+        done
+        for dev_id in $PCI_DEVS; do
+            logger -t usb-lan-fix " [+] PCI xHCI Bağlanıyor: $dev_id"
+            echo "$dev_id" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null || true
+        done
+
+        logger -t usb-lan-fix " [+] Anakart USB portlarına güç başarıyla geri verildi. Donanım uyanacak."
     else
-        logger -t usb-lan-fix "$FOUND adet Realtek USB adaptör resetlendi."
+        logger -t usb-lan-fix " [-] RİSKLİ: USB üzerinden boot edilmiş olabilir. Donanım reseti iptal edildi."
     fi
 }
 
-stop() { : ; }
+stop() {
+    : ;
+}
 """
 
 # ==============================================================================
 # OPENWRT ÇALIŞMA ORTAMI KORUMASI
 # ==============================================================================
-# Tüm üretilen betiklerin başına eklenir.
-# Betik yanlışlıkla yerel makinede çalıştırılırsa anlamlı hata mesajı
-# basar ve çıkar — uci/opkg bulunamadı hatası yerine.
 OPENWRT_GUARD: Final[str] = """\
 # --- OpenWrt Ortam Kontrolü ---
 if ! command -v uci >/dev/null 2>&1; then
     echo '------------------------------------------------------------'
-    echo '  HATA: Bu betik yalnizca OpenWrt router uzerinde calisir.'
-    echo '  Lutfen betigi yerel makinenizde calistirmayin.'
+    echo '  HATA: Bu betik yalnızca OpenWrt router üzerinde çalışır.'
+    echo '  Lütfen betiği yerel makinenizde çalıştırmayın.'
     echo ''
-    echo '  Dogru kullanim (SSH ile gonderin):'
-    echo '    cat BETIK.sh | ssh root@192.168.1.1 ash'
+    echo '  Doğru kullanım (SSH ile gönderin):'
+    echo '    cat BETİK.sh | ssh root@192.168.1.1 ash'
     echo '------------------------------------------------------------'
     exit 1
 fi"""
 
-# Shell bloğu — her üretilen .sh dosyasına gömülür.
-# Değiştirilmesi gereken tek yer burasıdır.
+# ==============================================================================
+# PAKET YÖNETİCİSİ UYUMLULUK KATMANI
+# ==============================================================================
 PKG_MANAGER_BLOCK: Final[str] = """\
 # --- PAKET YÖNETİCİSİ UYUMLULUK KATMANI ---
 # OpenWrt < 25.12: opkg | OpenWrt >= 25.12: apk
@@ -155,3 +144,98 @@ else
     pkg_remove()       { opkg remove "$@"; }
     pkg_is_installed() { opkg list-installed 2>/dev/null | awk '{print $1}' | grep -q "^${1}$"; }
 fi"""
+
+# ==============================================================================
+# BAĞIMSIZ USB FIX KURULUM VE KALDIRMA ŞABLONLARI
+# ==============================================================================
+USB_FIX_SETUP_TEMPLATE: Final[str] = f"""#!/bin/sh
+# ==============================================================================
+# setup_usb_fix.sh - USB Ethernet xHCI Donanımsal Reset Kurulumu
+# ==============================================================================
+
+set -e
+
+<<PKG_MANAGER_BLOCK>>
+
+echo "================================================================"
+echo "  USB Ethernet (r8152) ANAKART GÜÇ KESİNTİSİ Fix Kurulumu"
+echo "================================================================"
+
+echo "[1/4] Raspberry Pi 5 USB Akım Limiti Kontrolü..."
+BOOT_CONF=""
+if [ -f /boot/config.txt ]; then
+    BOOT_CONF="/boot/config.txt"
+elif [ -f /boot/firmware/config.txt ]; then
+    BOOT_CONF="/boot/firmware/config.txt"
+fi
+
+if [ -n "$BOOT_CONF" ]; then
+    mount -o remount,rw /boot 2>/dev/null || true
+    mount -o remount,rw /boot/firmware 2>/dev/null || true
+    
+    if ! grep -q "usb_max_current_enable=1" "$BOOT_CONF"; then
+        echo "" >> "$BOOT_CONF"
+        echo "# OpenWrt USB Fix: RPi5 USB port akım limitini 600mA'den 1600mA'e çıkarır" >> "$BOOT_CONF"
+        echo "usb_max_current_enable=1" >> "$BOOT_CONF"
+        echo "  [+] usb_max_current_enable=1 eklendi! (USB portlarına 1.6A tam güç verildi)"
+    else
+        echo "  [+] Akım limiti zaten kaldırılmış (1.6A aktif durumda)."
+    fi
+else
+    echo "  [-] /boot/config.txt bulunamadı, akım limiti yaması atlandı."
+fi
+
+echo "[2/4] /etc/init.d/usb-lan-fix servisi oluşturuluyor..."
+cat << 'EOF_USBFIX' > /etc/init.d/usb-lan-fix
+{USB_FIX_SERVICE}
+EOF_USBFIX
+
+echo "[3/4] İzinler ayarlanıyor ve başlangıç servisi etkinleştiriliyor..."
+chmod +x /etc/init.d/usb-lan-fix
+/etc/init.d/usb-lan-fix enable
+
+echo "[4/4] Servis şu an anında tetikleniyor..."
+/etc/init.d/usb-lan-fix start
+
+echo "================================================================"
+echo "  KURULUM TAMAMLANDI!"
+echo "  Sistem açılışında ağ servisleri devreye girmeden hemen önce"
+echo "  USB kontrolcüsünün (xHCI) elektriği kesilip geri verilecektir."
+echo "  NOT: Akım limiti değişikliğinin (1.6A) aktif olması için"
+echo "  cihazınızı YENİDEN BAŞLATMANIZ (Reboot) gerekmektedir."
+echo "================================================================"
+"""
+
+USB_FIX_UNINSTALL_TEMPLATE: Final[str] = """#!/bin/sh
+# ==============================================================================
+# uninstall_usb_fix.sh - USB Ethernet xHCI Donanımsal Reset Kaldırma
+# ==============================================================================
+
+echo "================================================================"
+echo "  USB Ethernet Boot Fix Kaldırılıyor..."
+echo "================================================================"
+if [ -f "/etc/init.d/usb-lan-fix" ]; then
+    /etc/init.d/usb-lan-fix disable >/dev/null 2>&1 || true
+    rm -f /etc/init.d/usb-lan-fix
+    echo "  > Servis başarıyla sistemden silindi."
+else
+    echo "  > Servis zaten kurulu değil."
+fi
+
+BOOT_CONF=""
+if [ -f /boot/config.txt ]; then
+    BOOT_CONF="/boot/config.txt"
+elif [ -f /boot/firmware/config.txt ]; then
+    BOOT_CONF="/boot/firmware/config.txt"
+fi
+
+if [ -n "$BOOT_CONF" ]; then
+    mount -o remount,rw /boot 2>/dev/null || true
+    mount -o remount,rw /boot/firmware 2>/dev/null || true
+    sed -i '/usb_max_current_enable=1/d' "$BOOT_CONF"
+    sed -i '/OpenWrt USB Fix/d' "$BOOT_CONF"
+    echo "  > usb_max_current_enable (1.6A) yaması config.txt dosyasından kaldırıldı."
+fi
+
+echo "================================================================"
+"""

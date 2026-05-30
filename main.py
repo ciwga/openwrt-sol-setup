@@ -429,6 +429,10 @@ def generate_and_save(mgr: Manager, config: Dict[str, str], mode: str) -> None:
         save_setup("setup_argon_fan.sh", mgr.generate_argon_fan_setup(config), rip)
         save_uninstall("uninstall_argon_fan.sh", mgr.generate_argon_fan_uninstall(config))
 
+    if mode == "usb_fix":
+        save_setup("setup_usb_fix.sh", mgr.generate_usb_fix_setup(config), rip)
+        save_uninstall("uninstall_usb_fix.sh", mgr.generate_usb_fix_uninstall(config))
+
 
 # ---- CLI Ana Metodu ----
 
@@ -448,8 +452,9 @@ def run_cli() -> None:
     print("  5. Tailscale VPN")
     print("  6. Komple Kurulum (WAN + TV+ + DNS + Zapret + Tailscale)")
     print("  7. Disk Genişletme (Raspberry Pi 5)")
-    print("  8. Argon ONE V3 Fan Kontrol (RPi5 + Argon kasası)")
+    print("  8. Argon ONE V3 Fan Kontrol")
     print("  9. IPv6 Kapat / Aç")
+    print("  10. USB Ethernet Boot Fix (Sadece Servisi Kur / Güncelle)")
     print("")
     print("  ÖNEMLİ: Tüm modüller internet gerektirir — 1 olmadan diğerleri çalışmaz.")
     print("  Hepsini tek seferde kurmak için: 6 (Komple Kurulum)")
@@ -459,7 +464,7 @@ def run_cli() -> None:
     print("  cihaz açıldıktan sonra BİR DEFAYA MAHSUS söküp tekrar takınız.")
     print("")
 
-    choice = ask_choice("Seçiminiz (1-9): ", [str(i) for i in range(1, 10)])
+    choice = ask_choice("Seçiminiz (1-10): ", [str(i) for i in range(1, 11)])
     config: Dict[str, str] = {}
 
     if choice in ("1", "6"): config.update(collect_wan_config(mgr))
@@ -478,7 +483,10 @@ def run_cli() -> None:
         print(f"\n  YAPILANDIRMA HATASI: {e}")
         sys.exit(1)
 
-    mode_map = {"1": "wan", "2": "tvplus", "3": "dns", "4": "zapret", "5": "tailscale", "6": "all", "7": "disk", "8": "fan", "9": "ipv6"}
+    mode_map = {
+        "1": "wan", "2": "tvplus", "3": "dns", "4": "zapret", "5": "tailscale", 
+        "6": "all", "7": "disk", "8": "fan", "9": "ipv6", "10": "usb_fix"
+    }
     mode = mode_map[choice]
     
     print("\n" + "=" * 50)
@@ -535,8 +543,13 @@ def run_cli() -> None:
         ]
     elif mode == "fan":
         available_scripts = [
-            (os.path.join(KURULUM_DIR, "setup_argon_fan.sh"), "setup_argon_fan.sh", "Argon Fan Kurulum Betiği"),
+            (os.path.join(KURULUM_DIR, "setup_argon_fan.sh"), "setup_argon_fan.sh", "Argon Araçları (Fan) Kurulum Betiği"),
             (os.path.join(KALDIRMA_DIR, "uninstall_argon_fan.sh"), "uninstall_argon_fan.sh", "Argon Fan Kaldırma Betiği")
+        ]
+    elif mode == "usb_fix":
+        available_scripts = [
+            (os.path.join(KURULUM_DIR, "setup_usb_fix.sh"), "setup_usb_fix.sh", "USB Fix Kurulum/Güncelleme Betiği"),
+            (os.path.join(KALDIRMA_DIR, "uninstall_usb_fix.sh"), "uninstall_usb_fix.sh", "USB Fix Kaldırma Betiği")
         ]
 
     # Otomasyon akışı ve betik seçimi

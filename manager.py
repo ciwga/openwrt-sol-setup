@@ -3,11 +3,12 @@
 Konfigürasyon yönetimi ve iş mantığı.
 """
 
+import os
 import re
 import binascii
 from typing import Dict, Any, Final, List
 
-from compat import PKG_MANAGER_BLOCK, USB_FIX_SERVICE, OPENWRT_GUARD
+from compat import PKG_MANAGER_BLOCK, OPENWRT_GUARD, USB_FIX_SETUP_TEMPLATE, USB_FIX_UNINSTALL_TEMPLATE
 from templates_tvplus import TVPLUS_SETUP_TEMPLATE, TVPLUS_L2_SETUP_TEMPLATE, TVPLUS_UNINSTALL_TEMPLATE
 from templates_dns import DNS_CHAIN_SETUP_TEMPLATE, DNS_CHAIN_UNINSTALL_TEMPLATE
 from templates_zapret import ZAPRET_SETUP_TEMPLATE, ZAPRET_UNINSTALL_TEMPLATE
@@ -35,8 +36,35 @@ DEFAULT_ZAPRET_DOMAINS: Final[List[str]] = [
     "google.com", "cloudflare.com", "x.com", "twitter.com", 
     "twimg.com", "t.co", "kick.com", "ttvnw.net", "twitch.tv", 
     "torproject.org", "cloudflare-dns.com", "dns.google", "one.one.one.one",
-    "dns.quad9.net", "adguard-dns.io"
+    "dns.quad9.net", "adguard-dns.io", "whatsapp.net", "whatsapp.com", "wa.me",
+    "steam-api.com", "steam-chat.com", "steamcommunity.com", "steamcontent.com",
+    "akamaihd.net", "steamdeck.com", "steamgames.com", "steamstatic.com",
+    "steamusercontent.com", "steam.tv"
 ]
+
+def load_zapret_domains(file_path: str = "zapret_domains.txt") -> List[str]:
+    """
+    Zapret modülü için kullanılacak alan adlarını harici bir dosyadan yükler.
+
+    Args:
+        file_path (str): Alan adlarının okunacağı dosya yolu.
+
+    Returns:
+        List[str]: Alan adlarını içeren liste.
+    """
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                domains: List[str] = []
+                for line in f:
+                    cleaned_line = line.strip()
+                    if cleaned_line and not cleaned_line.startswith("#"):
+                        domains.append(cleaned_line)
+                return domains
+        except (IOError, OSError):
+            pass
+    
+    return DEFAULT_ZAPRET_DOMAINS
 
 # Boş bırakılabilir alanların listesi
 OPTIONAL_FIELDS: Final[set] = {
@@ -83,7 +111,7 @@ class Manager:
             "isp_dns": "213.74.0.1,213.74.1.1",
         }
         self.zapret_defaults: Dict[str, Any] = {
-            "zapret_domains": " ".join(DEFAULT_ZAPRET_DOMAINS),
+            "zapret_domains": " ".join(load_zapret_domains()),
         }
         self.tailscale_defaults: Dict[str, Any] = {
             "tailscale_auth_key": "",
@@ -136,9 +164,9 @@ class Manager:
             return value
 
         if key == "auto_multicast":
-            if value not in ("evet", "hayır"):
+            if value.lower() not in ("evet", "e", "hayır", "h"):
                 raise ValueError("Lütfen 'evet' veya 'hayır' giriniz.")
-            return value
+            return value.lower()
 
         if key == "iptv_mode":
             if value.lower() not in ("proxy", "bridge", "köprü"):
@@ -225,22 +253,18 @@ class Manager:
         iptv_mode = config.get("iptv_mode", "bridge").strip().lower()
         tv_eth2 = config.get("tv_eth2_port", "").strip()
 
-        # Eğer bridge modu seçildiyse L2 Bridge şablonunu kullan
         if iptv_mode in ("bridge", "köprü"):
             if not tv_eth2:
                 raise ValueError("L2 Bridge modu için fiziksel bir TV portu (örn: eth2) belirtilmelidir!")
             script = TVPLUS_L2_SETUP_TEMPLATE
         else:
-            # Proxy modu
             script = TVPLUS_SETUP_TEMPLATE
 
-        # Hostname hex encode
         raw = config.get("host_name", "")
         hostname_hex = binascii.hexlify(raw.encode("utf-8")).decode("utf-8") if raw else ""
         script = script.replace("<<HOST_NAME_HEX>>", hostname_hex)
-        script = script.replace("<<USB_FIX_SERVICE>>", USB_FIX_SERVICE)
+        script = script.replace("<<USB_FIX_SERVICE>>", USB_FIX_SETUP_TEMPLATE)
 
-        # Proxy modunda eth2 subnet izolasyonu istenmişse
         if iptv_mode not in ("bridge", "köprü"):
             if tv_eth2:
                 eth2_block = self._render_eth2_block(tv_eth2, config)
@@ -248,7 +272,6 @@ class Manager:
                 eth2_block = '    echo "    > Ayrı TV portu belirtilmedi — TV br-lan üzerinden proxy edilecek."'
             script = script.replace("<<TV_ETH2_BLOCK>>", eth2_block)
 
-        # Değişkenleri yerleştir
         for key, val in config.items():
             script = script.replace(f"<<{key.upper()}>>", str(val))
 
@@ -260,7 +283,6 @@ class Manager:
         return f"""    # --- İzole TV Subnet ({eth2_port}) ---
     echo "    > {eth2_port} bulundu — TV izole subnet (192.168.2.0/24) kuruluyor..."
 
-    # br-lan'dan çıkar
     LAN_DEV_IDX=0
     while uci -q get "network.@device[$LAN_DEV_IDX]" >/dev/null 2>&1; do
         DEV_NAME=$(uci -q get "network.@device[$LAN_DEV_IDX].name" 2>/dev/null)
@@ -372,7 +394,7 @@ class Manager:
         """Zapret DPI Bypass kurulum betiğini oluşturur."""
         script = ZAPRET_SETUP_TEMPLATE
         script = script.replace("<<ZAPRET_DOMAINS>>",
-                                config.get("zapret_domains", " ".join(DEFAULT_ZAPRET_DOMAINS)))
+                                config.get("zapret_domains", " ".join(load_zapret_domains())))
         return self._render(script)
 
     def generate_zapret_uninstall(self, config: Dict[str, str]) -> str:
@@ -412,17 +434,7 @@ class Manager:
 
         usb_eth = config.get("usb_eth", "yok")
         if usb_eth and usb_eth != "yok":
-            usb_fix_block = f"""\
-    echo "    > r8152 boot fix servisi kuruluyor..."
-    echo "    > (Tüm r8152 adaptörler otomatik tespit edilir — {usb_eth} dahil)"
-    cat << 'EOF_USBFIX' > /etc/init.d/usb-lan-fix
-{USB_FIX_SERVICE}
-EOF_USBFIX
-    chmod +x /etc/init.d/usb-lan-fix
-    /etc/init.d/usb-lan-fix enable
-    echo "    > /etc/init.d/usb-lan-fix oluşturuldu ve etkinleştirildi."
-    echo "    > Boot'ta r8152 olan tüm arayüzler resetlenecek."
-"""
+            usb_fix_block = USB_FIX_SETUP_TEMPLATE
         else:
             usb_fix_block = '    echo "    > USB Ethernet fix belirtilmedi, atlandı."'
 
@@ -432,7 +444,6 @@ EOF_USBFIX
     def generate_wan_uninstall(self, config: Dict[str, str]) -> str:
         """WAN PPPoE kaldırma betiğini döndürür."""
         script = WAN_UNINSTALL_TEMPLATE
-        # VLAN device temizliği — sadece wan_vlan_id varsa eklenir
         wan_vlan = config.get("wan_vlan_id", "").strip()
         vlan_cleanup = "uci -q delete network.wan_vlan_dev 2>/dev/null || true\n" if wan_vlan and wan_vlan != "0" else ""
         script = script.replace("<<WAN_VLAN_CLEANUP>>", vlan_cleanup)
@@ -464,6 +475,31 @@ EOF_USBFIX
     def generate_argon_fan_uninstall(self, config: Dict[str, str]) -> str:
         """Argon Fan Kaldırma betiğini döndürür."""
         return self._render(ARGON_FAN_UNINSTALL_TEMPLATE)
+
+    # --- Bağımsız USB Fix Kurulumu ---
+    def generate_usb_fix_setup(self, config: Dict[str, str]) -> str:
+        """
+        Sadece USB Ethernet Boot Fix (r8152) servisini kuran/güncelleyen bağımsız betik.
+        
+        Args:
+            config (Dict[str, str]): Kullanıcı yapılandırması (imza uyumluluğu için).
+            
+        Returns:
+            str: Bağımsız kurulum shell betiği.
+        """
+        return self._render(USB_FIX_SETUP_TEMPLATE)
+
+    def generate_usb_fix_uninstall(self, config: Dict[str, str]) -> str:
+        """
+        USB Fix servisini sistemden temizleyen betik.
+        
+        Args:
+            config (Dict[str, str]): Kullanıcı yapılandırması (imza uyumluluğu için).
+            
+        Returns:
+            str: Kaldırma shell betiği.
+        """
+        return self._render(USB_FIX_UNINSTALL_TEMPLATE)
 
     # --- Birleşik Kurulum ---
     def generate_full_setup(self, config: Dict[str, str]) -> str:

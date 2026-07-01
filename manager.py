@@ -69,7 +69,7 @@ def load_zapret_domains(file_path: str = "zapret_domains.txt") -> List[str]:
 # Boş bırakılabilir alanların listesi
 OPTIONAL_FIELDS: Final[set] = {
     "mac_address", "client_id", "host_name", "zapret_domains", "tv_eth2_port", "iptv_mode", "wan_vlan_id", "tailnet_name", "wol_enabled",
-    "tvplus_stb_mac", "tvplus_stb_ip", "isp_dns",
+    "tvplus_stb_mac", "tvplus_stb_ip", "isp_dns", "doh_backend",
     "tailscale_auth_key", "lan_subnet",
     "pppoe_user", "pppoe_pass", "custom_dns", "usb_eth", "wan_mac_address",
 }
@@ -109,6 +109,7 @@ class Manager:
             "tvplus_stb_mac": "",
             "tvplus_stb_ip": "",
             "isp_dns": "213.74.0.1,213.74.1.1",
+            "doh_backend": "hdnsp",
         }
         self.zapret_defaults: Dict[str, Any] = {
             "zapret_domains": " ".join(load_zapret_domains()),
@@ -172,6 +173,11 @@ class Manager:
             if value.lower() not in ("proxy", "bridge", "köprü"):
                 raise ValueError("IPTV modu 'proxy' veya 'bridge' olabilir.")
             return "bridge" if value.lower() == "köprü" else value.lower()
+            
+        if key == "doh_backend":
+            if value.lower() not in ("hdnsp", "agh"):
+                raise ValueError("DoH Backend 'hdnsp' veya 'agh' olabilir.")
+            return value.lower()
 
         if key in ("mac_address", "tvplus_stb_mac", "wan_mac_address"):
             if not value:
@@ -381,7 +387,8 @@ class Manager:
         for ph, key in [("<<LAN_IP>>", "lan_ip"), ("<<AGH_DNS_PORT>>", "agh_dns_port"),
                         ("<<AGH_WEB_PORT>>", "agh_web_port"), ("<<HDNSP_PORT>>", "hdnsp_port"),
                         ("<<TVPLUS_STB_MAC>>", "tvplus_stb_mac"),
-                        ("<<TVPLUS_STB_IP>>", "tvplus_stb_ip"), ("<<ISP_DNS>>", "isp_dns")]:
+                        ("<<TVPLUS_STB_IP>>", "tvplus_stb_ip"), ("<<ISP_DNS>>", "isp_dns"),
+                        ("<<DOH_BACKEND>>", "doh_backend")]:
             script = script.replace(ph, config.get(key, ""))
         return self._render(script)
 

@@ -288,9 +288,20 @@ def collect_dns_config(mgr: Manager) -> Dict[str, str]:
     config: Dict[str, str] = {}
     print("\n--- DNS Zinciri Ayarları ---")
     config["lan_ip"] = ask("Router LAN IP", str(d["lan_ip"]), mgr.validate_input, "lan_ip")
+    
+    print("\n--- DoH (DNS-over-HTTPS) Motoru Seçimi ---")
+    print("  AdGuard Home internete çıkarken DoH kullanır. Bunu kimin yapacağını seçin:")
+    print("  hdnsp : (Varsayılan) Ayrı bir https-dns-proxy servisi çalışır.")
+    print("  agh   : DoH işlemini doğrudan AdGuard Home yapar (Daha sade sistem, tavsiye edilen).\n")
+    config["doh_backend"] = ask("DoH Motoru (hdnsp/agh)", str(d.get("doh_backend", "hdnsp")), mgr.validate_input, "doh_backend")
+
     config["agh_dns_port"] = ask("AdGuard DNS portu", str(d["agh_dns_port"]), mgr.validate_input, "agh_dns_port")
     config["agh_web_port"] = ask("AdGuard Web portu", str(d["agh_web_port"]), mgr.validate_input, "agh_web_port")
-    config["hdnsp_port"] = ask("HTTPS-DNS-Proxy portu", str(d["hdnsp_port"]), mgr.validate_input, "hdnsp_port")
+    
+    if config["doh_backend"] == "hdnsp":
+        config["hdnsp_port"] = ask("HTTPS-DNS-Proxy portu", str(d["hdnsp_port"]), mgr.validate_input, "hdnsp_port")
+    else:
+        config["hdnsp_port"] = str(d["hdnsp_port"])
 
     print("\n--- TV+ Kutusu DNS Bypass ---")
     print("  TV+ kutusunun superonlinetv.com gibi domainleri ISP DNS üzerinden")
@@ -370,7 +381,7 @@ def collect_tailscale_config(mgr: Manager) -> Dict[str, str]:
         print("\n--- MagicDNS (opsiyonel) ---")
         print("  accept-dns=hayır seçildi. Tailscale hostname\'lerini çözmek için")
         print("  tailnet adınızı girin (örn: myname.ts.net veya tail1234.ts.net).")
-        print("  Tailscale admin → Settings → General → Tailnet name\'de bulabilirsiniz.")
+        print("  Tailscale admin → DNS → Tailnet DNS name\'de bulabilirsiniz.")
         print("  Boş bırakırsanız sadece IP ile bağlanabilirsiniz.\n")
         config["tailnet_name"] = ask("Tailnet adı (boş=MagicDNS devre dışı)", str(d.get("tailnet_name", "")))
     else:
